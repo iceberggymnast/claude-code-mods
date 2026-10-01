@@ -41,7 +41,6 @@ type HandoffDoc = { path: string; isTracked: boolean }
 // 그때는 만료 전 압축도, 수동 압축 앞의 반영 턴도 하지 않는다.
 let lastRequestAt: number | undefined
 let transcriptPath: string | undefined
-let lastAnswer = ''
 let idleTimer: { cancel: () => void } | undefined
 let idleAt: number | undefined
 let idleLateAt: number | undefined
@@ -105,14 +104,14 @@ export const register: Register = (on, options) => {
     }
 
     if (isBusy || e.reason !== 'answer') return result
-    lastAnswer = e.answer
 
     const { context } = await $.session.usage()
     if ((context.percent ?? 0) >= PREEMPT_PERCENT) {
       $.clock.after(AFTER_TURN_MS, () => void begin($, `컨텍스트가 ${context.percent}%까지 찼다.`))
       return result
     }
-    await scheduleIdle($, context.tokens ?? 0)
+    // 기록 파일 읽기와 응답 대기 판정에 몇 초가 걸린다. 턴 종료를 붙잡지 않도록 기다리지 않는다.
+    void scheduleIdle($, context.tokens ?? 0, e.answer)
     return result
   })
 
@@ -131,23 +130,26 @@ export const register: Register = (on, options) => {
   })
 }
 
-async function scheduleIdle($: EngineInterface, tokens: number) {
+// 사용자의 답을 기다리는 턴에서만 예약한다. 끝난 보고면 돌아올 가능성이 낮아 압축 비용만 남는다.
+async function scheduleIdle($: EngineInterface, tokens: number, answer: string) {
   cancelIdle()
+  showStatus($)
+  const requestAt = lastRequestAt
   // 기준 토큰을 넘을 수 있을 때만 기록 파일을 읽는다. 작은 세션은 매 턴 프로세스를 띄울 이유가 없다.
   const minTokens = Math.min(IDLE_RULES['1h'].minTokens, IDLE_RULES['5m'].minTokens)
-  if (lastRequestAt !== undefined && tokens >= minTokens) {
-    // 마지막 응답이 실제로 캐시된 TTL. 확인하지 못하면 예약하지 않는다.
-    const ttl = await readTtl($)
-    const rule = ttl && IDLE_RULES[ttl]
-    if (rule && tokens >= rule.minTokens) {
-      const wait = rule.compactAfterMs - ((await $.clock.now()) - lastRequestAt)
-      if (wait > 0) {
-        idleAt = lastRequestAt + rule.compactAfterMs
-        idleLateAt = lastRequestAt + rule.lateLimitMs
-        idleTimer = $.clock.after(wait, () => void onIdle($))
-      }
-    }
-  }
+  if (requestAt === undefined || tokens < minTokens) return
+  // 마지막 응답이 실제로 캐시된 TTL. 확인하지 못하면 예약하지 않는다.
+  const ttl = await readTtl($)
+  const rule = ttl && IDLE_RULES[ttl]
+  if (!rule || tokens < rule.minTokens) return
+  if (!(await isAwaitingReply($, answer))) return
+  // 판정하는 몇 초 사이에 새 턴이 시작됐거나 압축이 진행 중이면 이 예약은 낡았다.
+  if (lastRequestAt !== requestAt || isBusy) return
+  const wait = rule.compactAfterMs - ((await $.clock.now()) - requestAt)
+  if (wait <= 0) return
+  idleAt = requestAt + rule.compactAfterMs
+  idleLateAt = requestAt + rule.lateLimitMs
+  idleTimer = $.clock.after(wait, () => void onIdle($))
   showStatus($)
 }
 
@@ -161,7 +163,6 @@ async function onIdle($: EngineInterface) {
   if ((await $.clock.now()) > lateAt) return
   // 입력창에 쓰던 글이 있으면 자리에 있는 것이다.
   if ((await $.prompt.read()).text.trim() !== '') return
-  if (!(await isAwaitingReply($, lastAnswer))) return
   await begin($, '자리를 비운 사이 프롬프트 캐시가 곧 만료된다.')
 }
 
