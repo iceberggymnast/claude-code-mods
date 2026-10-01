@@ -1,0 +1,7 @@
+# 개인 작업 기록과 공개 점검용 개인 문자열 목록
+STATE.md
+.private-patterns
+
+# 엔진이 모드를 로드할 때 생성하는 타입 파일
+plugins/*/.claude-plugin/types/
+plugins/*/tsconfig.json

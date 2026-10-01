@@ -1,0 +1,5 @@
+{
+  "name": "state-compact",
+  "version": "0.1.0",
+  "description": "압축 전에 STATE.md를 반영하고, 프롬프트 캐시 만료 직전 압축으로 재캐시 비용을 줄인다"
+}
