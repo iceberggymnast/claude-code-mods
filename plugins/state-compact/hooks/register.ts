@@ -1,12 +1,14 @@
 import type { EngineInterface, Register } from 'claude-code'
 
-// 만료 전 압축은 컨텍스트가 이보다 작으면 하지 않는다. 입력 단가 단위로 돌아왔을 때 아끼는 양이
-// 대략 1.8 × 컨텍스트 - 19만이라, 20만 아래는 아끼는 양이 작고 요약 손실만 남는다.
-const IDLE_MIN_TOKENS = 200_000
-// 마지막 요청 시작 후 이만큼 지나면 압축을 시작한다. 1시간 TTL에 5분 여유를 둔다.
-const IDLE_COMPACT_MS = 55 * 60_000
-// 타이머가 이보다 늦게 돌면(절전에서 깨어남) 캐시가 이미 만료된 것으로 보고 건너뛴다.
-const LATE_LIMIT_MS = 58 * 60_000
+// 만료 전 압축의 TTL별 기준. 값은 입력 단가 단위로 "돌아왔을 때 아끼는 양 > 0"에서 정했다.
+//  - minTokens: 이보다 작으면 압축하지 않는다. 1시간은 다시 쓰기가 2배라 1.8 × 컨텍스트 - 19만,
+//    5분은 1.25배라 1.15 × 컨텍스트 - 14만이 남는다. 5분은 자리에 있는데 압축할 일도 잦아 기준을 더 높였다.
+//  - compactAfterMs: 마지막 요청 시작 후 이만큼 지나면 압축을 시작한다. 만료 전에 첫 요청이 나가야 한다.
+//  - lateLimitMs: 타이머가 이보다 늦게 돌면(절전에서 깨어남) 캐시가 이미 만료된 것으로 보고 건너뛴다.
+const IDLE_RULES = {
+  '1h': { minTokens: 200_000, compactAfterMs: 55 * 60_000, lateLimitMs: 58 * 60_000 },
+  '5m': { minTokens: 300_000, compactAfterMs: 4 * 60_000, lateLimitMs: 4.5 * 60_000 },
+} as const
 // 컨텍스트가 창의 이 비율을 넘기면 자동 압축이 오기 전에 STATE.md 반영 후 먼저 압축한다.
 const PREEMPT_PERCENT = 85
 const ONE_HOUR_MS = 60 * 60_000
@@ -42,6 +44,7 @@ let transcriptPath: string | undefined
 let lastAnswer = ''
 let idleTimer: { cancel: () => void } | undefined
 let idleAt: number | undefined
+let idleLateAt: number | undefined
 // STATE 반영 → 압축 순서가 진행 중이다.
 let isBusy = false
 let isAwaitingStateTurn = false
@@ -124,24 +127,32 @@ export const register: Register = on => {
 
 async function scheduleIdle($: EngineInterface, tokens: number) {
   cancelIdle()
-  if (lastRequestAt !== undefined && tokens >= IDLE_MIN_TOKENS) {
-    const wait = IDLE_COMPACT_MS - ((await $.clock.now()) - lastRequestAt)
-    if (wait > 0) {
-      idleAt = lastRequestAt + IDLE_COMPACT_MS
-      idleTimer = $.clock.after(wait, () => void onIdle($))
+  // 기준 토큰을 넘을 수 있을 때만 기록 파일을 읽는다. 작은 세션은 매 턴 프로세스를 띄울 이유가 없다.
+  const minTokens = Math.min(IDLE_RULES['1h'].minTokens, IDLE_RULES['5m'].minTokens)
+  if (lastRequestAt !== undefined && tokens >= minTokens) {
+    // 마지막 응답이 실제로 캐시된 TTL. 확인하지 못하면 예약하지 않는다.
+    const ttl = await readTtl($)
+    const rule = ttl && IDLE_RULES[ttl]
+    if (rule && tokens >= rule.minTokens) {
+      const wait = rule.compactAfterMs - ((await $.clock.now()) - lastRequestAt)
+      if (wait > 0) {
+        idleAt = lastRequestAt + rule.compactAfterMs
+        idleLateAt = lastRequestAt + rule.lateLimitMs
+        idleTimer = $.clock.after(wait, () => void onIdle($))
+      }
     }
   }
   showStatus($)
 }
 
 async function onIdle($: EngineInterface) {
+  const lateAt = idleLateAt
   idleTimer = undefined
   idleAt = undefined
+  idleLateAt = undefined
   showStatus($)
-  if (isBusy || lastRequestAt === undefined) return
-  if ((await $.clock.now()) - lastRequestAt > LATE_LIMIT_MS) return
-  // 마지막 응답이 실제로 1시간 TTL로 캐시됐을 때만 압축한다. 5분이었으면 캐시는 이미 없다.
-  if ((await readTtl($)) !== '1h') return
+  if (isBusy || lateAt === undefined) return
+  if ((await $.clock.now()) > lateAt) return
   // 입력창에 쓰던 글이 있으면 자리에 있는 것이다.
   if ((await $.prompt.read()).text.trim() !== '') return
   if (!(await isAwaitingReply($, lastAnswer))) return
@@ -152,6 +163,7 @@ function cancelIdle() {
   idleTimer?.cancel()
   idleTimer = undefined
   idleAt = undefined
+  idleLateAt = undefined
 }
 
 async function begin($: EngineInterface, reason: string, instructions?: string) {
