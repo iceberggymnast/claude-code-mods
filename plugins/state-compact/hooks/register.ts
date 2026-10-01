@@ -9,11 +9,11 @@ const IDLE_RULES = {
   '1h': { minTokens: 200_000, compactAfterMs: 55 * 60_000, lateLimitMs: 58 * 60_000 },
   '5m': { minTokens: 300_000, compactAfterMs: 4 * 60_000, lateLimitMs: 4.5 * 60_000 },
 } as const
-// 컨텍스트가 창의 이 비율을 넘기면 자동 압축이 오기 전에 STATE.md 반영 후 먼저 압축한다.
+// 컨텍스트가 창의 이 비율을 넘기면 자동 압축이 오기 전에 handoff 문서 반영 후 먼저 압축한다.
 const PREEMPT_PERCENT = 85
 const ONE_HOUR_MS = 60 * 60_000
 const FIVE_MIN_MS = 5 * 60_000
-// 수동 /compact 때 캐시가 살아 있다고 보는 여유. 이보다 만료에 가까우면 STATE 턴을 넣지 않는다.
+// 수동 /compact 때 캐시가 살아 있다고 보는 여유. 이보다 만료에 가까우면 반영 턴을 넣지 않는다.
 const CACHE_MARGIN_MS = 2 * 60_000
 // 응답 대기 판정에 넘기는 마지막 답변의 길이.
 const CLASSIFY_TAIL_CHARS = 4000
@@ -35,23 +35,29 @@ const TAIL_POWERSHELL =
   '[Console]::OutputEncoding=[Text.Encoding]::UTF8;[Console]::Out.Write([Text.Encoding]::UTF8.GetString($b))'
 
 type Ttl = '1h' | '5m'
-type StateDoc = { path: string; isTracked: boolean }
+type HandoffDoc = { path: string; isTracked: boolean }
 
 // 이 프로세스에서 마지막으로 보낸 메인 요청의 시작 시각. resume·재시작 직후에는 없으므로
-// 그때는 만료 전 압축도, 수동 압축 앞의 STATE 턴도 하지 않는다.
+// 그때는 만료 전 압축도, 수동 압축 앞의 반영 턴도 하지 않는다.
 let lastRequestAt: number | undefined
 let transcriptPath: string | undefined
 let lastAnswer = ''
 let idleTimer: { cancel: () => void } | undefined
 let idleAt: number | undefined
 let idleLateAt: number | undefined
-// STATE 반영 → 압축 순서가 진행 중이다.
+// handoff 문서 반영 → 압축 순서가 진행 중이다.
 let isBusy = false
-let isAwaitingStateTurn = false
-let stateTurnId: string | undefined
+let isAwaitingHandoffTurn = false
+let handoffTurnId: string | undefined
 let pendingInstructions: string | undefined
+// 사용자 설정(userConfig). handoffFile이 비어 있으면 문서 반영 없이 압축만 한다.
+let handoffFile = ''
+let skipPattern: RegExp | undefined
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  handoffFile = String(options.handoff_file ?? '').trim()
+  skipPattern = compilePattern(String(options.handoff_skip_pattern ?? ''))
+
   on('session.start', ($, e, next) => {
     showStatus($)
     return next(e)
@@ -75,9 +81,9 @@ export const register: Register = on => {
 
   on('turn.start', ($, e, next) => {
     cancelIdle()
-    if (isAwaitingStateTurn) {
-      isAwaitingStateTurn = false
-      stateTurnId = e.turnId
+    if (isAwaitingHandoffTurn) {
+      isAwaitingHandoffTurn = false
+      handoffTurnId = e.turnId
     }
     showStatus($)
     return next(e)
@@ -87,13 +93,13 @@ export const register: Register = on => {
     const result = await next(e)
     if (e.agentId) return result
 
-    if (stateTurnId !== undefined && e.turnId === stateTurnId) {
-      stateTurnId = undefined
+    if (handoffTurnId !== undefined && e.turnId === handoffTurnId) {
+      handoffTurnId = undefined
       if (e.reason === 'answer') {
         $.clock.after(AFTER_TURN_MS, () => void compactNow($))
       } else {
         finish($)
-        $.ui.toast('state-compact: STATE.md 반영이 끝나지 않아 압축하지 않았다')
+        $.ui.toast(`state-compact: ${handoffFile} 반영이 끝나지 않아 압축하지 않았다`)
       }
       return result
     }
@@ -114,14 +120,14 @@ export const register: Register = on => {
     if (e.agentId || isBusy) return next(e)
     // TTL을 확인하지 못하면 짧은 쪽으로 본다.
     const ttlMs = (await readTtl($)) === '1h' ? ONE_HOUR_MS : FIVE_MIN_MS
-    // resume한 세션이나 오래 쉰 세션은 캐시가 이미 없다. STATE 턴을 넣으면 전체를 한 번 더
+    // resume한 세션이나 오래 쉰 세션은 캐시가 이미 없다. 반영 턴을 넣으면 전체를 한 번 더
     // 캐시하게 되므로 그대로 압축한다.
     if (lastRequestAt === undefined || (await $.clock.now()) - lastRequestAt > ttlMs - CACHE_MARGIN_MS) {
       return next(e)
     }
-    if (!(await findStateDoc($))) return next(e)
+    if (!(await findHandoffDoc($))) return next(e)
     $.clock.after(AFTER_TURN_MS, () => void begin($, '/compact를 실행했다.', e.instructions))
-    return { skip: 'state-compact: STATE.md를 먼저 반영한 뒤 압축합니다' }
+    return { skip: `state-compact: ${handoffFile}을 먼저 반영한 뒤 압축합니다` }
   })
 }
 
@@ -172,13 +178,13 @@ async function begin($: EngineInterface, reason: string, instructions?: string) 
   cancelIdle()
   showStatus($)
   pendingInstructions = instructions
-  const doc = await findStateDoc($)
+  const doc = await findHandoffDoc($)
   if (!doc) {
     await compactNow($)
     return
   }
-  isAwaitingStateTurn = true
-  await $.prompt.submit({ text: statePrompt(doc, reason) })
+  isAwaitingHandoffTurn = true
+  await $.prompt.submit({ text: handoffPrompt(doc, reason) })
 }
 
 async function compactNow($: EngineInterface) {
@@ -194,48 +200,60 @@ async function compactNow($: EngineInterface) {
 
 function finish($: EngineInterface) {
   isBusy = false
-  isAwaitingStateTurn = false
+  isAwaitingHandoffTurn = false
   pendingInstructions = undefined
   showStatus($)
 }
 
-// 프롬프트 아래 한 줄: 켜져 있음 / 압축 예약 시각 / 진행 중.
+// 프롬프트 아래 한 줄: 켜져 있음(반영할 문서) / 압축 예약 시각 / 진행 중.
 function showStatus($: EngineInterface) {
+  const name = handoffFile ? `state-compact · ${handoffFile}` : 'state-compact'
   if (isBusy) {
-    $.ui.status('◆ state-compact: STATE 반영 후 압축 중')
+    $.ui.status(`◆ ${name}: 압축 중`)
   } else if (idleAt !== undefined) {
     const at = new Date(idleAt)
     const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
-    $.ui.status(`◇ state-compact: ${hhmm} 압축 예정`)
+    $.ui.status(`◇ ${name}: ${hhmm} 압축 예정`)
   } else {
-    $.ui.status('◇ state-compact')
+    $.ui.status(`◇ ${name}`)
   }
 }
 
-function statePrompt(doc: StateDoc, reason: string): string {
+function handoffPrompt(doc: HandoffDoc, reason: string): string {
   const commit = doc.isTracked
-    ? 'STATE.md는 git이 추적하는 파일이다. `git commit -- STATE.md` 형식으로 STATE.md만 커밋하라. 다른 변경은 커밋에 넣지 마라.'
-    : 'STATE.md는 git이 추적하지 않는 파일이다. 커밋하지 마라.'
+    ? `${handoffFile}은 git이 추적하는 파일이다. \`git commit -- ${handoffFile}\` 형식으로 이 파일만 커밋하라. 다른 변경은 커밋에 넣지 마라.`
+    : `${handoffFile}은 git이 추적하지 않는 파일이다. 커밋하지 마라.`
   return [
     `[state-compact] ${reason} 곧 대화를 압축한다. 압축하면 지금 대화의 세부 내용은 요약으로 바뀐다.`,
-    `압축 전에 ${doc.path}의 체크 항목과 다음 한 걸음을 지금까지 진행한 내용 기준으로 고쳐라.`,
+    `압축 전에 ${doc.path}에 지금까지 진행한 내용과 다음에 할 일을 반영하라.`,
     commit,
     '그 밖의 작업은 하지 말고, 끝나면 무엇을 고쳤는지 한 줄로만 답하라.',
   ].join('\n')
 }
 
-// 저장소 루트의 STATE.md. 목표 줄이 "(없음)"이거나 템플릿 그대로("(한 줄")면 진행 중인 작업이 없다고 본다.
-async function findStateDoc($: EngineInterface): Promise<StateDoc | undefined> {
+// 설정한 handoff 문서가 저장소 루트에 있으면 돌려준다. 설정이 비었거나, 파일이 없거나,
+// 내용이 건너뛰기 패턴에 맞으면(진행 중인 작업 없음) undefined.
+async function findHandoffDoc($: EngineInterface): Promise<HandoffDoc | undefined> {
+  if (!handoffFile) return undefined
   const cwd = await $.session.cwd()
   const top = await $.process.run(['git', 'rev-parse', '--show-toplevel'], { cwd })
   if (top.exitCode !== 0) return undefined
   const root = top.stdout.trim()
-  const path = `${root}/STATE.md`
+  const path = `${root}/${handoffFile}`
   if (!(await $.fs.exists(path))) return undefined
-  const goal = (await $.fs.read(path)).split(/\r?\n/).find(line => /^\s*-\s*목표/.test(line))
-  if (goal && /:\s*\((없음|한 줄)/.test(goal)) return undefined
-  const tracked = await $.process.run(['git', 'ls-files', '--error-unmatch', 'STATE.md'], { cwd: root })
+  if (skipPattern?.test(await $.fs.read(path))) return undefined
+  const tracked = await $.process.run(['git', 'ls-files', '--error-unmatch', handoffFile], { cwd: root })
   return { path, isTracked: tracked.exitCode === 0 }
+}
+
+// 정규식이 잘못됐으면 건너뛰기 없이 동작한다. 줄 단위로 맞추도록 m 플래그를 붙인다.
+function compilePattern(source: string): RegExp | undefined {
+  if (!source.trim()) return undefined
+  try {
+    return new RegExp(source, 'm')
+  } catch {
+    return undefined
+  }
 }
 
 async function isAwaitingReply($: EngineInterface, answer: string): Promise<boolean> {
