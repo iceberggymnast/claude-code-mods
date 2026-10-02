@@ -49,7 +49,7 @@ let isBusy = false
 let isAwaitingHandoffTurn = false
 let handoffTurnId: string | undefined
 let pendingInstructions: string | undefined
-// SDK 세션에서 압축을 /compact 프롬프트로 넣고 그 압축이 지나가기를 기다리는 중이다.
+// SDK 세션에서 /compact 명령을 실행하고 그 압축이 지나가기를 기다리는 중이다.
 let isAwaitingCompactPrompt = false
 // 마지막 실패 이유. 다음 턴이 시작될 때까지 상태 줄에 남긴다.
 let failure: string | undefined
@@ -97,10 +97,10 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (e.agentId) return result
 
-    // 넣은 /compact가 압축 없이 턴으로 끝났다. 슬래시 명령으로 처리되지 않은 것이다.
+    // 실행한 /compact가 압축 없이 턴으로 끝났다.
     if (isAwaitingCompactPrompt) {
       finish($)
-      notifyFailure($, '/compact 프롬프트가 압축으로 처리되지 않았다')
+      notifyFailure($, '/compact 명령이 압축 대신 턴으로 처리됐다')
       return result
     }
 
@@ -212,11 +212,18 @@ async function compactNow($: EngineInterface) {
     const r = await $.session.compact(pendingInstructions ? { instructions: pendingInstructions } : undefined)
     if (r.skip) notifyFailure($, `압축이 취소됐다 (${r.skip})`)
   } catch (err) {
-    // SDK 세션(데스크톱 앱 등)은 플러그인의 압축 호출을 거절하고, /compact 프롬프트의 턴 안에서만 압축한다.
+    // SDK 세션(데스크톱 앱 등)은 플러그인의 압축 호출을 거절한다. /compact를 프롬프트로 넣어도
+    // 큐에 들어가지 않았으므로 슬래시 명령으로 실행한다.
     if (String(err).includes('headless')) {
       isAwaitingCompactPrompt = true
-      const text = pendingInstructions ? `/compact ${pendingInstructions}` : '/compact'
-      await $.prompt.submit({ text, asUser: true })
+      try {
+        const r = await $.command.run({ command: 'compact', ...(pendingInstructions ? { args: pendingInstructions } : {}) })
+        // 명령이 끝났는데 압축 훅을 지나지 않았다.
+        if (isAwaitingCompactPrompt) notifyFailure($, `/compact 명령이 압축하지 않았다 (${r.text ?? '출력 없음'})`)
+      } catch (runErr) {
+        notifyFailure($, `/compact 명령을 실행하지 못했다 (${String(runErr)})`)
+      }
+      finish($)
       return
     }
     notifyFailure($, `압축하지 못했다 (${String(err)})`)
