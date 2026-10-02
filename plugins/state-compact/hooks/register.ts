@@ -51,6 +51,8 @@ let handoffTurnId: string | undefined
 let pendingInstructions: string | undefined
 // SDK 세션에서 압축을 /compact 프롬프트로 넣고 그 압축이 지나가기를 기다리는 중이다.
 let isAwaitingCompactPrompt = false
+// 마지막 실패 이유. 다음 턴이 시작될 때까지 상태 줄에 남긴다.
+let failure: string | undefined
 // 사용자 설정(userConfig). handoffFile이 비어 있으면 문서 반영 없이 압축만 한다.
 let handoffFile = ''
 let skipPattern: RegExp | undefined
@@ -82,6 +84,7 @@ export const register: Register = (on, options) => {
 
   on('turn.start', ($, e, next) => {
     cancelIdle()
+    failure = undefined
     if (isAwaitingHandoffTurn) {
       isAwaitingHandoffTurn = false
       handoffTurnId = e.turnId
@@ -97,7 +100,7 @@ export const register: Register = (on, options) => {
     // 넣은 /compact가 압축 없이 턴으로 끝났다. 슬래시 명령으로 처리되지 않은 것이다.
     if (isAwaitingCompactPrompt) {
       finish($)
-      $.ui.toast('state-compact: /compact 프롬프트가 압축으로 처리되지 않았다')
+      notifyFailure($, '/compact 프롬프트가 압축으로 처리되지 않았다')
       return result
     }
 
@@ -107,7 +110,7 @@ export const register: Register = (on, options) => {
         $.clock.after(AFTER_TURN_MS, () => void compactNow($))
       } else {
         finish($)
-        $.ui.toast(`state-compact: ${handoffFile} 반영이 끝나지 않아 압축하지 않았다`)
+        notifyFailure($, `${handoffFile} 반영이 끝나지 않아 압축하지 않았다`)
       }
       return result
     }
@@ -207,7 +210,7 @@ async function begin($: EngineInterface, reason: string, instructions?: string) 
 async function compactNow($: EngineInterface) {
   try {
     const r = await $.session.compact(pendingInstructions ? { instructions: pendingInstructions } : undefined)
-    if (r.skip) $.ui.toast(`state-compact: 압축이 취소됐다 (${r.skip})`)
+    if (r.skip) notifyFailure($, `압축이 취소됐다 (${r.skip})`)
   } catch (err) {
     // SDK 세션(데스크톱 앱 등)은 플러그인의 압축 호출을 거절하고, /compact 프롬프트의 턴 안에서만 압축한다.
     if (String(err).includes('headless')) {
@@ -216,7 +219,7 @@ async function compactNow($: EngineInterface) {
       await $.prompt.submit({ text, asUser: true })
       return
     }
-    $.ui.toast(`state-compact: 압축하지 못했다 (${String(err)})`)
+    notifyFailure($, `압축하지 못했다 (${String(err)})`)
   }
   finish($)
 }
@@ -229,11 +232,20 @@ function finish($: EngineInterface) {
   showStatus($)
 }
 
-// 프롬프트 아래 한 줄: 켜져 있음(반영할 문서) / 압축 예약 시각 / 진행 중.
+// 데스크톱 앱은 플러그인 토스트를 그리지 않으므로 상태 줄에도 남긴다.
+function notifyFailure($: EngineInterface, text: string) {
+  failure = text
+  $.ui.toast(`state-compact: ${text}`)
+  showStatus($)
+}
+
+// 프롬프트 아래 한 줄: 켜져 있음(반영할 문서) / 압축 예약 시각 / 진행 중 / 실패 이유.
 function showStatus($: EngineInterface) {
   const name = handoffFile ? `state-compact · ${handoffFile}` : 'state-compact'
   if (isBusy) {
     $.ui.status(`◆ ${name}: 압축 중`)
+  } else if (failure !== undefined) {
+    $.ui.status(`◇ ${name}: ${failure}`)
   } else if (idleAt !== undefined) {
     const at = new Date(idleAt)
     const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
