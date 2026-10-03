@@ -86,13 +86,14 @@ Change them under the plugin's entries in `/config`, or in `pluginConfigs` in `s
 - Right after a resume or an app restart the mod doesn't know when the last request was sent, so until you send one request in that session it neither schedules compaction nor updates the document before a manual `/compact`, and adds no new end-of-answer marks
 - There is no command to cancel a scheduled compaction. It's cleared when a new turn starts
 - The desktop app doesn't show plugin toasts. Check the end-of-answer marks for failure reasons
+- A manual `/compact` leaves two `/compact` bubbles in the conversation. The first is the one you typed (held back for the document update); the second is the mod running it again once the update is done
 
 ### Tested
 
-Tested on the Windows desktop app: manual `/compact` → document update → compaction (including summary instructions), and pre-expiry compaction in a 1-hour TTL session (it ran 55 minutes after the last request). Not yet tested:
+Tested on the Windows desktop app: manual `/compact` → document update → compaction (including summary instructions), pre-expiry compaction in a 1-hour TTL session (it ran 55 minutes after the last request), and the end-of-answer mark on a manual `/compact` going from `◆ 압축 중…` to `◆ 15:35 압축됨 · 수동`. Not yet tested:
 
 - Updating the document before a pre-expiry compaction (the compaction observed went straight to compacting without an update)
-- The end-of-answer marks (a test mod confirmed that a line added to the end of an answer in the desktop app is redrawn after compaction)
+- The scheduled, cache-expired and failed end-of-answer marks, and whether marks survive an app restart
 - Compaction at 85% context
 - 5-minute TTL sessions
 - The terminal CLI (function hooks were off in that build, so the mod didn't load)
