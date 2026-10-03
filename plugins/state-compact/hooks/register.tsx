@@ -43,7 +43,8 @@ const TAIL_POWERSHELL =
 type Ttl = '1h' | '5m'
 type HandoffDoc = { path: string; isTracked: boolean }
 // 답 끝에 남기는 기록. 그 답에 붙은 채로 지우지 않는다.
-type Mark = { kind: 'compacted' | 'expired' | 'failed'; at: number; detail?: string }
+// tokens는 캐시 만료 때의 컨텍스트 크기다.
+type Mark = { kind: 'compacted' | 'expired' | 'failed'; at: number; detail?: string; tokens?: number }
 
 // 이 프로세스에서 마지막으로 보낸 메인 요청의 시작 시각. resume·재시작 직후에는 없으므로
 // 그때는 만료 전 압축도, 수동 압축 앞의 반영 턴도 하지 않는다.
@@ -92,19 +93,23 @@ export const register: Register = (on, options) => {
       lastId = e.requestId
       for (const mark of pendingMarks.splice(0)) void addMark($, mark)
     }
-    const lines = (marks.get(e.requestId) ?? []).map(markText)
+    // 한 줄에 왼쪽은 항목, 오른쪽은 시각.
+    const rows = (marks.get(e.requestId) ?? []).map(markRow)
     if (e.requestId === lastId) {
-      if (isBusy) lines.push('◆ 압축 중…')
-      else if (idleAt !== undefined) lines.push(`◇ ${hhmm(idleAt)} 압축 예정`)
+      if (isBusy) rows.push(['◆ 압축 중…', '지금'])
+      else if (idleAt !== undefined) rows.push(['◇ 압축 예정', hhmm(idleAt)])
     }
-    if (lines.length === 0) return drawn
+    if (rows.length === 0) return drawn
     const { Box, Text } = $.ui.resolve(e)
     return (
       <Box flexDirection="column">
         {drawn}
-        <Box flexDirection="column" alignSelf="flex-start" borderStyle="round" borderDimColor paddingX={1}>
-          {lines.map(line => (
-            <Text dimColor>{line}</Text>
+        <Box flexDirection="column" width="100%" borderStyle="round" borderDimColor paddingX={1}>
+          {rows.map(([item, time]) => (
+            <Box flexDirection="row" justifyContent="space-between">
+              <Text dimColor>{item}</Text>
+              <Text dimColor>{time}</Text>
+            </Box>
           ))}
         </Box>
       </Box>
@@ -119,7 +124,7 @@ export const register: Register = (on, options) => {
     }
     const result = await next(e)
     if (e.source === 'resume' && e.seconds_since_last_response !== undefined) {
-      void restoreExpiry($, e.seconds_since_last_response)
+      void restoreExpiry($, e.seconds_since_last_response, e.context_tokens)
     }
     return result
   })
@@ -288,13 +293,14 @@ async function onIdle($: EngineInterface) {
 async function onExpire($: EngineInterface, expireAt: number) {
   expiryTimer = undefined
   if (isBusy) return
-  await addMark($, { kind: 'expired', at: expireAt })
+  const { context } = await $.session.usage()
+  await addMark($, { kind: 'expired', at: expireAt, tokens: context.tokens })
 }
 
 // 다시 연 세션의 마지막 응답 기준으로 만료를 남긴다. 이미 지났으면 바로, 아니면 예약한다.
 // 데스크톱 앱은 세션을 열기만 해서는 프로세스를 띄우지 않아, 대개 새 메시지를 보낼 때 여기에 온다.
 // 마지막 요청 시각은 모르므로 응답 시각을 쓴다. 표시 시각은 실제 만료보다 응답 시간만큼 늦다.
-async function restoreExpiry($: EngineInterface, secondsSinceResponse: number) {
+async function restoreExpiry($: EngineInterface, secondsSinceResponse: number, tokens: number | undefined) {
   const respondedAt = (await $.clock.now()) - secondsSinceResponse * 1000
   const ttl = await readTtl($)
   if (!ttl) return
@@ -312,7 +318,7 @@ async function restoreExpiry($: EngineInterface, secondsSinceResponse: number) {
   const expireAt = respondedAt + (ttl === '1h' ? ONE_HOUR_MS : FIVE_MIN_MS)
   const wait = expireAt - (await $.clock.now())
   if (wait <= 0) {
-    await addMark($, { kind: 'expired', at: expireAt })
+    await addMark($, { kind: 'expired', at: expireAt, tokens })
     return
   }
   // 그 사이 새 요청이 나갔으면 그 턴이 예약한다.
@@ -406,10 +412,13 @@ function redraw($: EngineInterface) {
   $.ui.invalidate('ui.render')
 }
 
-function markText(mark: Mark): string {
-  if (mark.kind === 'compacted') return `◆ ${hhmm(mark.at)} 압축됨 · ${mark.detail}`
-  if (mark.kind === 'expired') return `○ ${hhmm(mark.at)} 캐시 만료`
-  return `✕ ${hhmm(mark.at)} 압축 실패 · ${mark.detail}`
+function markRow(mark: Mark): [string, string] {
+  if (mark.kind === 'compacted') return [`◆ 압축됨 · ${mark.detail}`, hhmm(mark.at)]
+  if (mark.kind === 'expired') {
+    const size = mark.tokens === undefined ? '' : ` (컨텍스트 ${Math.round(mark.tokens / 1000)}k)`
+    return [`○ 캐시 만료${size}`, hhmm(mark.at)]
+  }
+  return [`✕ 압축 실패 · ${mark.detail}`, hhmm(mark.at)]
 }
 
 function hhmm(ms: number): string {
