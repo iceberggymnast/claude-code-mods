@@ -92,10 +92,11 @@ Change them under the plugin's entries in `/config`, or in `pluginConfigs` in `s
 
 ### Tested
 
-Tested on the Windows desktop app: manual `/compact` → document update → compaction (including summary instructions), pre-expiry compaction in a 1-hour TTL session (it ran 55 minutes after the last request), and the end-of-answer mark on a manual `/compact` going from `◆ 압축 중…` to `◆ 15:35 압축됨 · 수동`. Not yet tested:
+Tested on the Windows desktop app: manual `/compact` → document update → compaction (including summary instructions), pre-expiry compaction in a 1-hour TTL session (it ran 55 minutes after the last request), and the end-of-answer mark on a manual `/compact` going from `◆ 압축 중…` to `◆ 15:35 압축됨 · 수동`, the `○ 18:16 캐시 만료` mark on a session whose TTL ran out while another session was in view, and holding back the first message to an expired 860K-token session with a warning and putting the message back in the input box. Not yet tested:
 
 - Updating the document before a pre-expiry compaction (the compaction observed went straight to compacting without an update)
-- The scheduled, cache-expired and failed end-of-answer marks, and whether marks survive an app restart
+- The scheduled and failed end-of-answer marks, and whether marks survive an app restart
+- Whether a held-back first message goes through when sent again, and whether a cache expiry that passed while the app was closed is added to the previous answer of a reopened session
 - Compaction at 85% context
 - 5-minute TTL sessions
 - The terminal CLI (function hooks were off in that build, so the mod didn't load)
