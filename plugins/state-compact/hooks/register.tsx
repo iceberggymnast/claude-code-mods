@@ -67,6 +67,8 @@ let marks = new Map<string, Mark[]>()
 // 마지막 답의 텍스트와, 그 답을 그리는 블록의 id. 진행 상태(압축 예정·압축 중)는 이 블록에만 붙인다.
 let lastAnswer: string | undefined
 let lastId: string | undefined
+// 마지막 답 블록을 찾기 전에 생긴 기록. 찾으면 그 답에 붙인다.
+let pendingMarks: Mark[] = []
 
 export const register: Register = (on, options) => {
   handoffFile = String(options.handoff_file ?? '').trim()
@@ -84,6 +86,7 @@ export const register: Register = (on, options) => {
     // 그린 순서로 고르면 위로 스크롤해 처음 그려진 옛 블록이 잡힌다.
     if (lastId === undefined && lastAnswer !== undefined && tail(e.props.text) !== '' && tail(e.props.text) === tail(lastAnswer)) {
       lastId = e.requestId
+      for (const mark of pendingMarks.splice(0)) void addMark($, mark)
     }
     const lines = (marks.get(e.requestId) ?? []).map(markText)
     if (e.requestId === lastId) {
@@ -102,6 +105,16 @@ export const register: Register = (on, options) => {
         </Box>
       </Box>
     )
+  })
+
+  // 앱을 재시작하거나 세션을 다시 열었다. 꺼져 있던 동안 지난 캐시 만료를 남긴다.
+  on('classic.SessionStart', async ($, e, next) => {
+    transcriptPath = e.transcript_path
+    const result = await next(e)
+    if (e.source === 'resume' && e.seconds_since_last_response !== undefined) {
+      void restoreExpiry($, e.seconds_since_last_response)
+    }
+    return result
   })
 
   on('classic.UserPromptSubmit', ($, e, next) => {
@@ -254,6 +267,28 @@ async function onExpire($: EngineInterface, expireAt: number) {
   await addMark($, { kind: 'expired', at: expireAt })
 }
 
+// 다시 연 세션의 마지막 응답 기준으로 만료 표시를 예약한다. 이미 지났으면 바로 남긴다.
+// 마지막 요청 시각은 모르므로 응답 시각을 쓴다. 표시 시각은 실제 만료보다 응답 시간만큼 늦다.
+async function restoreExpiry($: EngineInterface, secondsSinceResponse: number) {
+  const respondedAt = (await $.clock.now()) - secondsSinceResponse * 1000
+  const ttl = await readTtl($)
+  if (!ttl) return
+  // 꺼지기 전에 만료나 압축을 이미 남겼으면 다시 남기지 않는다.
+  const saved = (await $.store.get('marks')) as Record<string, Mark[]> | undefined
+  if (Object.values(saved ?? {}).flat().some(m => m.kind !== 'failed' && m.at >= respondedAt)) return
+  const messages = await $.session.messages()
+  // 그 사이 새 요청이 나갔으면 그 턴이 예약한다.
+  if (lastRequestAt !== undefined || !Array.isArray(messages)) return
+  if (lastAnswer === undefined) {
+    const answers = messages.filter(m => m.role === 'assistant' && m.text.trim())
+    lastAnswer = answers[answers.length - 1]?.text
+    redraw($)
+  }
+  const expireAt = respondedAt + (ttl === '1h' ? ONE_HOUR_MS : FIVE_MIN_MS)
+  cancelExpiry()
+  expiryTimer = $.clock.after(Math.max(0, expireAt - (await $.clock.now())), () => void onExpire($, expireAt))
+}
+
 function cancelIdle() {
   idleTimer?.cancel()
   idleTimer = undefined
@@ -322,9 +357,13 @@ function notifyFailure($: EngineInterface, text: string) {
   void $.clock.now().then(at => addMark($, { kind: 'failed', at, detail: text }))
 }
 
-// 지금 마지막 답에 기록을 붙인다. 마지막 답을 아직 모르면(재시작 직후 턴 전) 남기지 않는다.
+// 지금 마지막 답에 기록을 붙인다. 답은 알지만 블록을 아직 못 찾았으면 찾을 때 붙이고,
+// 답도 모르면(재시작 직후 턴 전) 남기지 않는다.
 async function addMark($: EngineInterface, mark: Mark) {
-  if (lastId === undefined) return
+  if (lastId === undefined) {
+    if (lastAnswer !== undefined) pendingMarks.push(mark)
+    return
+  }
   marks.set(lastId, [...(marks.get(lastId) ?? []), mark])
   while (marks.size > MAX_MARKED_REPLIES) marks.delete(marks.keys().next().value!)
   redraw($)

@@ -83,7 +83,7 @@ Change them under the plugin's entries in `/config`, or in `pluginConfigs` in `s
 
 ### Limitations
 
-- Right after a resume or an app restart the mod doesn't know when the last request was sent, so until you send one request in that session it neither schedules compaction nor updates the document before a manual `/compact`, and adds no new end-of-answer marks
+- Right after a resume or an app restart the mod doesn't know when the last request was sent, so until you send one request in that session it neither schedules compaction nor updates the document before a manual `/compact`. The cache-expired mark is based on the last response time instead: if the cache expired while the app was closed, the mark is added when the session reopens, and its time is later than the real expiry by however long that response took
 - There is no command to cancel a scheduled compaction. It's cleared when a new turn starts
 - The desktop app doesn't show plugin toasts. Check the end-of-answer marks for failure reasons
 - A manual `/compact` leaves two `/compact` bubbles in the conversation. The first is the one you typed (held back for the document update); the second is the mod running it again once the update is done
