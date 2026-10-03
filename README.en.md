@@ -6,7 +6,7 @@ A collection of Claude Code function-hook plugins (mods).
 
 | Mod | What it does |
 | --- | --- |
-| [state-compact](plugins/state-compact) | Updates a handoff document before compaction, and compacts just before the prompt cache expires to cut re-caching cost |
+| [state-compact](plugins/state-compact) | Updates a handoff document before compaction, and cuts re-caching cost by compacting just before the prompt cache expires and warning before the first message to an expired session |
 
 The text shown at the end of answers and the prompts the mods send to Claude are in Korean.
 

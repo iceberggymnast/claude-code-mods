@@ -6,7 +6,7 @@ Claude Code 함수 훅 플러그인(모드) 모음.
 
 | 모드 | 하는 일 |
 | --- | --- |
-| [state-compact](plugins/state-compact) | 압축 전에 handoff 문서를 반영하고, 프롬프트 캐시 만료 직전 압축으로 재캐시 비용을 줄인다 |
+| [state-compact](plugins/state-compact) | 압축 전에 handoff 문서를 반영하고, 프롬프트 캐시 만료 직전 압축과 만료된 세션의 첫 메시지 경고로 재캐시 비용을 줄인다 |
 
 ## 설치
 
