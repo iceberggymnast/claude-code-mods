@@ -267,7 +267,8 @@ async function onExpire($: EngineInterface, expireAt: number) {
   await addMark($, { kind: 'expired', at: expireAt })
 }
 
-// 다시 연 세션의 마지막 응답 기준으로 만료 표시를 예약한다. 이미 지났으면 바로 남긴다.
+// 다시 연 세션의 마지막 응답 기준으로 만료를 남긴다. 이미 지났으면 바로, 아니면 예약한다.
+// 데스크톱 앱은 세션을 열기만 해서는 프로세스를 띄우지 않아, 대개 새 메시지를 보낼 때 여기에 온다.
 // 마지막 요청 시각은 모르므로 응답 시각을 쓴다. 표시 시각은 실제 만료보다 응답 시간만큼 늦다.
 async function restoreExpiry($: EngineInterface, secondsSinceResponse: number) {
   const respondedAt = (await $.clock.now()) - secondsSinceResponse * 1000
@@ -277,16 +278,23 @@ async function restoreExpiry($: EngineInterface, secondsSinceResponse: number) {
   const saved = (await $.store.get('marks')) as Record<string, Mark[]> | undefined
   if (Object.values(saved ?? {}).flat().some(m => m.kind !== 'failed' && m.at >= respondedAt)) return
   const messages = await $.session.messages()
-  // 그 사이 새 요청이 나갔으면 그 턴이 예약한다.
-  if (lastRequestAt !== undefined || !Array.isArray(messages)) return
+  if (!Array.isArray(messages)) return
+  // 새 메시지의 답이 아직 안 왔으면 다시 열기 전의 마지막 답에 붙인다.
   if (lastAnswer === undefined) {
     const answers = messages.filter(m => m.role === 'assistant' && m.text.trim())
     lastAnswer = answers[answers.length - 1]?.text
     redraw($)
   }
   const expireAt = respondedAt + (ttl === '1h' ? ONE_HOUR_MS : FIVE_MIN_MS)
+  const wait = expireAt - (await $.clock.now())
+  if (wait <= 0) {
+    await addMark($, { kind: 'expired', at: expireAt })
+    return
+  }
+  // 그 사이 새 요청이 나갔으면 그 턴이 예약한다.
+  if (lastRequestAt !== undefined) return
   cancelExpiry()
-  expiryTimer = $.clock.after(Math.max(0, expireAt - (await $.clock.now())), () => void onExpire($, expireAt))
+  expiryTimer = $.clock.after(wait, () => void onExpire($, expireAt))
 }
 
 function cancelIdle() {
