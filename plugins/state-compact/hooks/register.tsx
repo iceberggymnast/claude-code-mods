@@ -21,6 +21,10 @@ const CLASSIFY_TAIL_CHARS = 4000
 const AFTER_TURN_MS = 1000
 // TTL을 찾으려고 세션 기록 파일 끝에서 읽는 바이트 수.
 const TRANSCRIPT_TAIL_BYTES = 1024 * 1024
+// 답 끝 표시를 남겨 두는 답의 수. 넘으면 오래된 것부터 지운다($.store는 4 MiB가 한도다).
+const MAX_MARKED_REPLIES = 200
+// 마지막 답을 찾을 때 비교하는 끝부분 길이. 화면에 그리는 텍스트는 앞부분이 원문과 다를 수 있다.
+const MATCH_TAIL_CHARS = 80
 
 const CLASSIFY_SYSTEM =
   'You label the last message an AI coding assistant sent to its user. Reply with one word. ' +
@@ -36,6 +40,8 @@ const TAIL_POWERSHELL =
 
 type Ttl = '1h' | '5m'
 type HandoffDoc = { path: string; isTracked: boolean }
+// 답 끝에 남기는 기록. 그 답에 붙은 채로 지우지 않는다.
+type Mark = { kind: 'compacted' | 'expired' | 'failed'; at: number; detail?: string }
 
 // 이 프로세스에서 마지막으로 보낸 메인 요청의 시작 시각. resume·재시작 직후에는 없으므로
 // 그때는 만료 전 압축도, 수동 압축 앞의 반영 턴도 하지 않는다.
@@ -44,24 +50,58 @@ let transcriptPath: string | undefined
 let idleTimer: { cancel: () => void } | undefined
 let idleAt: number | undefined
 let idleLateAt: number | undefined
+let expiryTimer: { cancel: () => void } | undefined
 // handoff 문서 반영 → 압축 순서가 진행 중이다.
 let isBusy = false
+// 진행 중인 압축을 답 끝에 적을 때의 이유. 플러그인이 시작한 압축에만 있다.
+let compactLabel: string | undefined
 let isAwaitingHandoffTurn = false
 let handoffTurnId: string | undefined
 let pendingInstructions: string | undefined
 // SDK 세션에서 /compact 명령을 실행하고 그 압축이 지나가기를 기다리는 중이다.
 let isAwaitingCompactPrompt = false
-// 마지막 실패 이유. 다음 턴이 시작될 때까지 상태 줄에 남긴다.
-let failure: string | undefined
 // 사용자 설정(userConfig). handoffFile이 비어 있으면 문서 반영 없이 압축만 한다.
 let handoffFile = ''
+// 답(메시지 id)별 기록. $.store에 같이 써서 앱을 다시 켜도 남긴다.
+let marks = new Map<string, Mark[]>()
+// 마지막 답의 텍스트와, 그 답을 그리는 블록의 id. 진행 상태(압축 예정·압축 중)는 이 블록에만 붙인다.
+let lastAnswer: string | undefined
+let lastId: string | undefined
 
 export const register: Register = (on, options) => {
   handoffFile = String(options.handoff_file ?? '').trim()
 
-  on('session.start', ($, e, next) => {
-    showStatus($)
+  on('session.start', async ($, e, next) => {
+    const saved = await $.store.get('marks')
+    if (saved && typeof saved === 'object') marks = new Map(Object.entries(saved as Record<string, Mark[]>))
+    redraw($)
     return next(e)
+  })
+
+  on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+    const drawn = await next(e)
+    // 마지막 답이 정해진 뒤 처음 그려지는 블록 중 끝부분이 같은 것을 그 답으로 본다.
+    // 그린 순서로 고르면 위로 스크롤해 처음 그려진 옛 블록이 잡힌다.
+    if (lastId === undefined && lastAnswer !== undefined && tail(e.props.text) !== '' && tail(e.props.text) === tail(lastAnswer)) {
+      lastId = e.requestId
+    }
+    const lines = (marks.get(e.requestId) ?? []).map(markText)
+    if (e.requestId === lastId) {
+      if (isBusy) lines.push('◆ 압축 중…')
+      else if (idleAt !== undefined) lines.push(`◇ ${hhmm(idleAt)} 압축 예정`)
+    }
+    if (lines.length === 0) return drawn
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        {drawn}
+        <Box flexDirection="column" alignSelf="flex-start" borderStyle="round" borderDimColor paddingX={1}>
+          {lines.map(line => (
+            <Text dimColor>{line}</Text>
+          ))}
+        </Box>
+      </Box>
+    )
   })
 
   on('classic.UserPromptSubmit', ($, e, next) => {
@@ -82,18 +122,23 @@ export const register: Register = (on, options) => {
 
   on('turn.start', ($, e, next) => {
     cancelIdle()
-    failure = undefined
+    cancelExpiry()
     if (isAwaitingHandoffTurn) {
       isAwaitingHandoffTurn = false
       handoffTurnId = e.turnId
     }
-    showStatus($)
+    redraw($)
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (e.agentId) return result
+    if (e.answer.trim()) {
+      lastAnswer = e.answer
+      lastId = undefined
+      redraw($)
+    }
 
     // 실행한 /compact가 압축 없이 턴으로 끝났다.
     if (isAwaitingCompactPrompt) {
@@ -113,16 +158,33 @@ export const register: Register = (on, options) => {
       return result
     }
 
-    if (isBusy || e.reason !== 'answer') return result
+    if (isBusy) return result
+    // 중단된 턴도 캐시는 남으므로 만료 표시만 예약한다(토큰 0이면 만료 전 압축은 건너뛴다).
+    if (e.reason !== 'answer') {
+      void scheduleTimers($, 0, '')
+      return result
+    }
 
     const { context } = await $.session.usage()
     if ((context.percent ?? 0) >= PREEMPT_PERCENT) {
-      $.clock.after(AFTER_TURN_MS, () => void begin($, `컨텍스트가 ${context.percent}%까지 찼다.`))
+      $.clock.after(AFTER_TURN_MS, () => void begin($, `컨텍스트가 ${context.percent}%까지 찼다.`, `컨텍스트 ${context.percent}%`))
       return result
     }
     // 기록 파일 읽기와 응답 대기 판정에 몇 초가 걸린다. 턴 종료를 붙잡지 않도록 기다리지 않는다.
-    void scheduleIdle($, context.tokens ?? 0, e.answer)
+    void scheduleTimers($, context.tokens ?? 0, e.answer)
     return result
+  })
+
+  // 메인 대화의 압축이 끝나면 그 시점의 마지막 답 끝에 남긴다. 어떤 경로로 압축됐든 같다.
+  on('session.compact', async ($, e, next) => {
+    if (e.agentId || e.trigger === 'precompute') return next(e)
+    const label = compactLabel ?? (e.trigger === 'auto' ? '자동' : '수동')
+    const r = await next(e)
+    if (r.skip) return r
+    // 압축하면서 캐시를 새로 만들었으므로 이전 요청 기준의 만료 표시는 맞지 않다.
+    cancelExpiry()
+    await addMark($, { kind: 'compacted', at: await $.clock.now(), detail: label })
+    return r
   })
 
   on('session.compact', { trigger: 'manual' }, async ($, e, next) => {
@@ -142,23 +204,26 @@ export const register: Register = (on, options) => {
       return next(e)
     }
     if (!(await findHandoffDoc($))) return next(e)
-    $.clock.after(AFTER_TURN_MS, () => void begin($, '/compact를 실행했다.', e.instructions))
+    $.clock.after(AFTER_TURN_MS, () => void begin($, '/compact를 실행했다.', '수동', e.instructions))
     return { skip: `state-compact: ${handoffFile}을 먼저 반영한 뒤 압축합니다` }
   })
 }
 
-// 사용자의 답을 기다리는 턴에서만 예약한다. 끝난 보고면 돌아올 가능성이 낮아 압축 비용만 남는다.
-async function scheduleIdle($: EngineInterface, tokens: number, answer: string) {
+// 캐시 만료 표시는 매 턴 예약한다. 만료 전 압축은 사용자의 답을 기다리는 턴에서만 예약한다.
+// 끝난 보고면 돌아올 가능성이 낮아 압축 비용만 남는다.
+async function scheduleTimers($: EngineInterface, tokens: number, answer: string) {
   cancelIdle()
-  showStatus($)
+  cancelExpiry()
+  redraw($)
   const requestAt = lastRequestAt
-  // 기준 토큰을 넘을 수 있을 때만 기록 파일을 읽는다. 작은 세션은 매 턴 프로세스를 띄울 이유가 없다.
-  const minTokens = Math.min(IDLE_RULES['1h'].minTokens, IDLE_RULES['5m'].minTokens)
-  if (requestAt === undefined || tokens < minTokens) return
+  if (requestAt === undefined) return
   // 마지막 응답이 실제로 캐시된 TTL. 확인하지 못하면 예약하지 않는다.
   const ttl = await readTtl($)
-  const rule = ttl && IDLE_RULES[ttl]
-  if (!rule || tokens < rule.minTokens) return
+  if (!ttl || lastRequestAt !== requestAt || isBusy) return
+  const expireAt = requestAt + (ttl === '1h' ? ONE_HOUR_MS : FIVE_MIN_MS)
+  expiryTimer = $.clock.after(Math.max(0, expireAt - (await $.clock.now())), () => void onExpire($, expireAt))
+  const rule = IDLE_RULES[ttl]
+  if (tokens < rule.minTokens) return
   if (!(await isAwaitingReply($, answer))) return
   // 판정하는 몇 초 사이에 새 턴이 시작됐거나 압축이 진행 중이면 이 예약은 낡았다.
   if (lastRequestAt !== requestAt || isBusy) return
@@ -167,7 +232,7 @@ async function scheduleIdle($: EngineInterface, tokens: number, answer: string) 
   idleAt = requestAt + rule.compactAfterMs
   idleLateAt = requestAt + rule.lateLimitMs
   idleTimer = $.clock.after(wait, () => void onIdle($))
-  showStatus($)
+  redraw($)
 }
 
 async function onIdle($: EngineInterface) {
@@ -175,12 +240,18 @@ async function onIdle($: EngineInterface) {
   idleTimer = undefined
   idleAt = undefined
   idleLateAt = undefined
-  showStatus($)
+  redraw($)
   if (isBusy || lateAt === undefined) return
   if ((await $.clock.now()) > lateAt) return
   // 입력창에 쓰던 글이 있으면 자리에 있는 것이다.
   if ((await $.prompt.read()).text.trim() !== '') return
-  await begin($, '자리를 비운 사이 프롬프트 캐시가 곧 만료된다.')
+  await begin($, '자리를 비운 사이 프롬프트 캐시가 곧 만료된다.', '자리 비움')
+}
+
+async function onExpire($: EngineInterface, expireAt: number) {
+  expiryTimer = undefined
+  if (isBusy) return
+  await addMark($, { kind: 'expired', at: expireAt })
 }
 
 function cancelIdle() {
@@ -190,11 +261,18 @@ function cancelIdle() {
   idleLateAt = undefined
 }
 
-async function begin($: EngineInterface, reason: string, instructions?: string) {
+function cancelExpiry() {
+  expiryTimer?.cancel()
+  expiryTimer = undefined
+}
+
+async function begin($: EngineInterface, reason: string, label: string, instructions?: string) {
   if (isBusy) return
   isBusy = true
+  compactLabel = label
   cancelIdle()
-  showStatus($)
+  cancelExpiry()
+  redraw($)
   pendingInstructions = instructions
   const doc = await findHandoffDoc($)
   if (!doc) {
@@ -233,31 +311,43 @@ function finish($: EngineInterface) {
   isBusy = false
   isAwaitingHandoffTurn = false
   isAwaitingCompactPrompt = false
+  compactLabel = undefined
   pendingInstructions = undefined
-  showStatus($)
+  redraw($)
 }
 
-// 데스크톱 앱은 플러그인 토스트를 그리지 않으므로 상태 줄에도 남긴다.
+// 데스크톱 앱은 플러그인 토스트를 그리지 않으므로 답 끝에도 남긴다.
 function notifyFailure($: EngineInterface, text: string) {
-  failure = text
   $.ui.toast(`state-compact: ${text}`)
-  showStatus($)
+  void $.clock.now().then(at => addMark($, { kind: 'failed', at, detail: text }))
 }
 
-// 프롬프트 아래 한 줄: 켜져 있음(반영할 문서) / 압축 예약 시각 / 진행 중 / 실패 이유.
-function showStatus($: EngineInterface) {
-  const name = handoffFile ? `state-compact · ${handoffFile}` : 'state-compact'
-  if (isBusy) {
-    $.ui.status(`◆ ${name}: 압축 중`)
-  } else if (failure !== undefined) {
-    $.ui.status(`◇ ${name}: ${failure}`)
-  } else if (idleAt !== undefined) {
-    const at = new Date(idleAt)
-    const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
-    $.ui.status(`◇ ${name}: ${hhmm} 압축 예정`)
-  } else {
-    $.ui.status(`◇ ${name}`)
-  }
+// 지금 마지막 답에 기록을 붙인다. 마지막 답을 아직 모르면(재시작 직후 턴 전) 남기지 않는다.
+async function addMark($: EngineInterface, mark: Mark) {
+  if (lastId === undefined) return
+  marks.set(lastId, [...(marks.get(lastId) ?? []), mark])
+  while (marks.size > MAX_MARKED_REPLIES) marks.delete(marks.keys().next().value!)
+  redraw($)
+  await $.store.set('marks', Object.fromEntries(marks))
+}
+
+function redraw($: EngineInterface) {
+  $.ui.invalidate('ui.render')
+}
+
+function markText(mark: Mark): string {
+  if (mark.kind === 'compacted') return `◆ ${hhmm(mark.at)} 압축됨 · ${mark.detail}`
+  if (mark.kind === 'expired') return `○ ${hhmm(mark.at)} 캐시 만료`
+  return `✕ ${hhmm(mark.at)} 압축 실패 · ${mark.detail}`
+}
+
+function hhmm(ms: number): string {
+  const d = new Date(ms)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+function tail(text: string): string {
+  return text.trim().slice(-MATCH_TAIL_CHARS)
 }
 
 function handoffPrompt(doc: HandoffDoc, reason: string): string {
