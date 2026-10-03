@@ -45,7 +45,7 @@ Compaction replaces the conversation's details with a summary, which blurs where
 - Manual `/compact`. Any summary instructions you pass are kept
 - Context passes 85% of the window. This runs before auto-compaction
 
-If the document is tracked by git, Claude is told to commit only that file.
+If the document exists at the repository root, it's updated every time regardless of its contents, so a session with no work in progress still gets one update turn. If the document is tracked by git, Claude is told to commit only that file.
 
 **Compaction before cache expiry.** When a turn ends and all of the following hold, the mod compacts (in the order above) just before the cache expires. Only the summary needs re-caching instead of the whole context, so returning costs less.
 
@@ -86,12 +86,13 @@ Change them under the plugin's entries in `/config`, or in `pluginConfigs` in `s
 - Right after a resume or an app restart the mod doesn't know when the last request was sent, so until you send one request in that session it neither schedules compaction nor updates the document before a manual `/compact`
 - There is no command to cancel a scheduled compaction. It's cleared when a new turn starts
 - The desktop app doesn't show plugin toasts. Check the status line for failure reasons
+- In the desktop app, a pre-expiry compaction that ran while you were away left no trace in the conversation: no compaction marker or `Compacted` row like a manual `/compact` shows. Check for `compact_boundary` in the session transcript file instead
 
 ### Tested
 
-Tested on the Windows desktop app: manual `/compact` → document update → compaction (including summary instructions), the status line, and scheduling compaction in a 1-hour TTL session. Not yet tested:
+Tested on the Windows desktop app: manual `/compact` → document update → compaction (including summary instructions), the status line, and pre-expiry compaction in a 1-hour TTL session (it ran 55 minutes after the last request). Not yet tested:
 
-- Whether a scheduled compaction actually runs
+- Updating the document before a pre-expiry compaction (the compaction observed went straight to compacting without an update)
 - Compaction at 85% context
 - 5-minute TTL sessions
 - The terminal CLI (function hooks were off in that build, so the mod didn't load)
