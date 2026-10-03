@@ -25,6 +25,8 @@ const TRANSCRIPT_TAIL_BYTES = 1024 * 1024
 const MAX_MARKED_REPLIES = 200
 // 마지막 답을 찾을 때 비교하는 끝부분 길이. 화면에 그리는 텍스트는 앞부분이 원문과 다를 수 있다.
 const MATCH_TAIL_CHARS = 80
+// 캐시가 만료된 세션을 다시 열어 첫 메시지를 보낼 때, 컨텍스트가 이 이상이면 한 번 막고 경고한다.
+const EXPIRED_WARN_TOKENS = 100_000
 
 const CLASSIFY_SYSTEM =
   'You label the last message an AI coding assistant sent to its user. Reply with one word. ' +
@@ -69,6 +71,8 @@ let lastAnswer: string | undefined
 let lastId: string | undefined
 // 마지막 답 블록을 찾기 전에 생긴 기록. 찾으면 그 답에 붙인다.
 let pendingMarks: Mark[] = []
+// 다시 연 세션의 캐시가 만료돼 첫 메시지가 컨텍스트 전체를 다시 캐시한다. 경고하거나 턴이 시작되면 지운다.
+let expiredResume: { tokens: number; usd?: number } | undefined
 
 export const register: Register = (on, options) => {
   handoffFile = String(options.handoff_file ?? '').trim()
@@ -110,11 +114,29 @@ export const register: Register = (on, options) => {
   // 앱을 재시작하거나 세션을 다시 열었다. 꺼져 있던 동안 지난 캐시 만료를 남긴다.
   on('classic.SessionStart', async ($, e, next) => {
     transcriptPath = e.transcript_path
+    if (e.source === 'resume' && e.prompt_cache_likely_expired && (e.context_tokens ?? 0) >= EXPIRED_WARN_TOKENS) {
+      expiredResume = { tokens: e.context_tokens ?? 0, usd: e.estimated_cache_write_usd }
+    }
     const result = await next(e)
     if (e.source === 'resume' && e.seconds_since_last_response !== undefined) {
       void restoreExpiry($, e.seconds_since_last_response)
     }
     return result
+  })
+
+  // 사용자가 쓴 첫 메시지만 막는다. 명령(/compact 등)은 그대로 보낸다. 같은 메시지를 다시 보내면 통과한다.
+  on('prompt.submit', async ($, e, next) => {
+    const warn = expiredResume
+    const isUser = e.origin.kind === 'composer' || e.origin.kind === 'bridge' || e.origin.kind === 'sdk'
+    if (!warn || !isUser || e.text.trimStart().startsWith('/')) return next(e)
+    expiredResume = undefined
+    const { isFilled } = await $.prompt.fill({ text: e.text })
+    const cost = warn.usd === undefined ? '' : `(약 $${warn.usd.toFixed(2)})`
+    return {
+      drop:
+        `state-compact: 캐시가 만료됐습니다. 보내면 컨텍스트 약 ${Math.round(warn.tokens / 1000)}k 토큰을 다시 캐시합니다${cost}. ` +
+        `그대로 보내려면 다시 보내고, 아니면 /compact나 새 세션을 쓰세요.${isFilled ? '' : ' 보낸 메시지는 입력창에 되돌리지 못했습니다.'}`,
+    }
   })
 
   on('classic.UserPromptSubmit', ($, e, next) => {
@@ -134,6 +156,7 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', ($, e, next) => {
+    expiredResume = undefined
     cancelIdle()
     cancelExpiry()
     if (isAwaitingHandoffTurn) {
@@ -194,8 +217,9 @@ export const register: Register = (on, options) => {
     const label = compactLabel ?? (e.trigger === 'auto' ? '자동' : '수동')
     const r = await next(e)
     if (r.skip) return r
-    // 압축하면서 캐시를 새로 만들었으므로 이전 요청 기준의 만료 표시는 맞지 않다.
+    // 압축하면서 캐시를 새로 만들었으므로 이전 요청 기준의 만료 표시와 경고는 맞지 않다.
     cancelExpiry()
+    expiredResume = undefined
     await addMark($, { kind: 'compacted', at: await $.clock.now(), detail: label })
     return r
   })

@@ -61,6 +61,8 @@ If the document exists at the repository root, it's updated every time regardles
 
 **End-of-answer marks.** A small box at the end of the last answer shows the scheduled compaction time (`◇ 15:52 압축 예정`) and compaction in progress (`◆ 압축 중…`). Compacted (`◆ 15:17 압축됨 · 자리 비움`), cache expired (`○ 16:12 캐시 만료`), and compaction failed (`✕ 15:17 압축 실패 · reason`) stay at the end of whichever answer was last at the time and are never removed. Cache expiry is shown once the TTL has passed since the last request, whatever the token count, unless the session was compacted first.
 
+**First message to an expired session.** When you reopen a session whose cache has expired and its context is 100K tokens or more, your first message is held back once with the number of tokens it would re-cache and the estimated cost. Send it again to go ahead. Slash commands (`/compact` and the like) aren't held back.
+
 ### Settings
 
 | Option | Default | Description |
