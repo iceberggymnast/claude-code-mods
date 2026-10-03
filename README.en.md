@@ -66,7 +66,6 @@ If the document is tracked by git, Claude is told to commit only that file.
 | Option | Default | Description |
 | --- | --- | --- |
 | `handoff_file` | (empty) | File to update before compaction, relative to the repository root. If empty, compacts without updating anything |
-| `handoff_skip_pattern` | (empty) | If the document matches this regex, there's no work in progress and the update is skipped. Matched per line |
 
 Change them under the plugin's entries in `/config`, or in `pluginConfigs` in `settings.json`. When loaded with `--plugin-dir` or `CLAUDE_CODE_PLUGIN_DIRS`, the key is `state-compact` or `state-compact@inline`.
 
@@ -75,8 +74,7 @@ Change them under the plugin's entries in `/config`, or in `pluginConfigs` in `s
   "pluginConfigs": {
     "state-compact@inline": {
       "options": {
-        "handoff_file": "STATE.md",
-        "handoff_skip_pattern": "^# No work in progress"
+        "handoff_file": "STATE.md"
       }
     }
   }

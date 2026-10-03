@@ -55,11 +55,9 @@ let isAwaitingCompactPrompt = false
 let failure: string | undefined
 // 사용자 설정(userConfig). handoffFile이 비어 있으면 문서 반영 없이 압축만 한다.
 let handoffFile = ''
-let skipPattern: RegExp | undefined
 
 export const register: Register = (on, options) => {
   handoffFile = String(options.handoff_file ?? '').trim()
-  skipPattern = compilePattern(String(options.handoff_skip_pattern ?? ''))
 
   on('session.start', ($, e, next) => {
     showStatus($)
@@ -274,8 +272,7 @@ function handoffPrompt(doc: HandoffDoc, reason: string): string {
   ].join('\n')
 }
 
-// 설정한 handoff 문서가 저장소 루트에 있으면 돌려준다. 설정이 비었거나, 파일이 없거나,
-// 내용이 건너뛰기 패턴에 맞으면(진행 중인 작업 없음) undefined.
+// 설정한 handoff 문서가 저장소 루트에 있으면 돌려준다. 설정이 비었거나 파일이 없으면 undefined.
 async function findHandoffDoc($: EngineInterface): Promise<HandoffDoc | undefined> {
   if (!handoffFile) return undefined
   const cwd = await $.session.cwd()
@@ -284,19 +281,8 @@ async function findHandoffDoc($: EngineInterface): Promise<HandoffDoc | undefine
   const root = top.stdout.trim()
   const path = `${root}/${handoffFile}`
   if (!(await $.fs.exists(path))) return undefined
-  if (skipPattern?.test(await $.fs.read(path))) return undefined
   const tracked = await $.process.run(['git', 'ls-files', '--error-unmatch', handoffFile], { cwd: root })
   return { path, isTracked: tracked.exitCode === 0 }
-}
-
-// 정규식이 잘못됐으면 건너뛰기 없이 동작한다. 줄 단위로 맞추도록 m 플래그를 붙인다.
-function compilePattern(source: string): RegExp | undefined {
-  if (!source.trim()) return undefined
-  try {
-    return new RegExp(source, 'm')
-  } catch {
-    return undefined
-  }
 }
 
 async function isAwaitingReply($: EngineInterface, answer: string): Promise<boolean> {

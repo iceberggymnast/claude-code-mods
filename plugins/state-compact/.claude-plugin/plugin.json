@@ -8,12 +8,6 @@
       "title": "Handoff 문서",
       "description": "압축 전에 Claude가 진행 상황을 반영할 파일. 저장소 루트 기준 이름(예: STATE.md, HANDOFF.md). 비우면 반영 없이 압축만 한다.",
       "default": ""
-    },
-    "handoff_skip_pattern": {
-      "type": "string",
-      "title": "건너뛰기 패턴",
-      "description": "Handoff 문서 내용이 이 정규식에 맞으면 진행 중인 작업이 없다고 보고 반영하지 않는다. 비우면 파일이 있을 때 항상 반영한다.",
-      "default": ""
     }
   }
 }

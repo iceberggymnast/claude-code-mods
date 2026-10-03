@@ -64,7 +64,6 @@ claude --plugin-dir <repo>/plugins/state-compact
 | 항목 | 기본값 | 설명 |
 | --- | --- | --- |
 | `handoff_file` | (비어 있음) | 압축 전에 반영할 파일. 저장소 루트 기준 이름. 비우면 반영 없이 압축만 한다 |
-| `handoff_skip_pattern` | (비어 있음) | 문서 내용이 이 정규식에 맞으면 진행 중인 작업이 없다고 보고 반영하지 않는다. 줄 단위로 맞춘다 |
 
 `/config`의 플러그인 항목에서 바꾸거나, `settings.json`의 `pluginConfigs`에 적는다. `--plugin-dir`·`CLAUDE_CODE_PLUGIN_DIRS`로 불러온 경우 키는 `state-compact` 또는 `state-compact@inline`이다.
 
@@ -73,8 +72,7 @@ claude --plugin-dir <repo>/plugins/state-compact
   "pluginConfigs": {
     "state-compact@inline": {
       "options": {
-        "handoff_file": "STATE.md",
-        "handoff_skip_pattern": "^# 진행 중인 작업 없음"
+        "handoff_file": "STATE.md"
       }
     }
   }
