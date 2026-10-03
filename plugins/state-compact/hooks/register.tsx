@@ -95,12 +95,12 @@ export const register: Register = (on, options) => {
     }
     // 한 줄에 왼쪽은 항목, 오른쪽은 시각.
     const rows = (marks.get(e.requestId) ?? []).map(markRow)
-    if (e.requestId === lastId) {
-      if (isBusy) rows.push(['◆ 압축 중…', '지금'])
-      else if (idleAt !== undefined) rows.push(['◇ 압축 예정', hhmm(idleAt)])
-    }
-    if (rows.length === 0) return drawn
-    const { Box, Text } = $.ui.resolve(e)
+    const isLast = e.requestId === lastId
+    if (isLast && isBusy) rows.push(['◆ 압축 중…', '지금'])
+    // 압축 예정 줄에는 예약을 푸는 버튼을 시각 오른쪽에 붙인다.
+    const scheduledAt = isLast && !isBusy ? idleAt : undefined
+    if (rows.length === 0 && scheduledAt === undefined) return drawn
+    const { Box, Text, Button } = $.ui.resolve(e)
     return (
       <Box flexDirection="column">
         {drawn}
@@ -111,6 +111,15 @@ export const register: Register = (on, options) => {
               <Text dimColor>{time}</Text>
             </Box>
           ))}
+          {scheduledAt !== undefined && (
+            <Box flexDirection="row" justifyContent="space-between">
+              <Text dimColor>◇ 압축 예정</Text>
+              <Box flexDirection="row" gap={1}>
+                <Text dimColor>{hhmm(scheduledAt)}</Text>
+                <Button key="cancel-idle" plain dimColor onPress={() => { cancelIdle(); redraw($) }}>취소</Button>
+              </Box>
+            </Box>
+          )}
         </Box>
       </Box>
     )

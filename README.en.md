@@ -59,7 +59,7 @@ If the document exists at the repository root, it's updated every time regardles
 - Skipped if the machine wakes from sleep past the scheduled time, since the cache has already expired
 - The TTL is read from the last response in the session transcript. If it can't be read, nothing is scheduled
 
-**End-of-answer marks.** A box as wide as the answer is added at its end, one line per mark with the item on the left and the time on the right. Scheduled compaction (`◇ 압축 예정`) and compaction in progress (`◆ 압축 중…`) appear only on the last answer. Compacted (`◆ 압축됨 · 자리 비움`), cache expired (`○ 캐시 만료 (컨텍스트 861k)`, the context size at expiry in parentheses), and compaction failed (`✕ 압축 실패 · reason`) stay at the end of whichever answer was last at the time and are never removed. Cache expiry is shown once the TTL has passed since the last request, whatever the token count, unless the session was compacted first.
+**End-of-answer marks.** A box as wide as the answer is added at its end, one line per mark with the item on the left and the time on the right. Scheduled compaction (`◇ 압축 예정`) and compaction in progress (`◆ 압축 중…`) appear only on the last answer; press `취소` at the right of the scheduled line to cancel it. Compacted (`◆ 압축됨 · 자리 비움`), cache expired (`○ 캐시 만료 (컨텍스트 861k)`, the context size at expiry in parentheses), and compaction failed (`✕ 압축 실패 · reason`) stay at the end of whichever answer was last at the time and are never removed. Cache expiry is shown once the TTL has passed since the last request, whatever the token count, unless the session was compacted first.
 
 **First message to an expired session.** When you reopen a session whose cache has expired and its context is 100K tokens or more, your first message is held back once with the number of tokens it would re-cache and the estimated cost. Send it again to go ahead. Slash commands (`/compact` and the like) aren't held back.
 
@@ -86,7 +86,6 @@ Change them under the plugin's entries in `/config`, or in `pluginConfigs` in `s
 ### Limitations
 
 - Right after a resume or an app restart the mod doesn't know when the last request was sent, so until you send one request in that session it neither schedules compaction nor updates the document before a manual `/compact`. The cache-expired mark is based on the last response time instead: if the cache expired while the app was closed, the mark is added to the previous last answer when you next send a message in that session (the desktop app doesn't run the mod just for opening a session from the list), and its time is later than the real expiry by however long that response took
-- There is no command to cancel a scheduled compaction. It's cleared when a new turn starts
 - The desktop app doesn't show plugin toasts. Check the end-of-answer marks for failure reasons
 - A manual `/compact` leaves two `/compact` bubbles in the conversation. The first is the one you typed (held back for the document update); the second is the mod running it again once the update is done
 
@@ -95,7 +94,7 @@ Change them under the plugin's entries in `/config`, or in `pluginConfigs` in `s
 Tested on the Windows desktop app: manual `/compact` → document update → compaction (including summary instructions), pre-expiry compaction in a 1-hour TTL session (it ran 55 minutes after the last request), and the end-of-answer mark on a manual `/compact` going from `◆ 압축 중…` to `◆ 15:35 압축됨 · 수동`, the `○ 18:16 캐시 만료` mark on a session whose TTL ran out while another session was in view, and holding back the first message to an expired 860K-token session with a warning and putting the message back in the input box. Not yet tested:
 
 - Updating the document before a pre-expiry compaction (the compaction observed went straight to compacting without an update)
-- The scheduled and failed end-of-answer marks, and whether marks survive an app restart
+- The scheduled end-of-answer mark and its cancel button, the failed mark, and whether marks survive an app restart
 - Whether a held-back first message goes through when sent again, and whether a cache expiry that passed while the app was closed is added to the previous answer of a reopened session
 - Compaction at 85% context
 - 5-minute TTL sessions
