@@ -546,7 +546,7 @@ async function readTtl($: EngineInterface): Promise<Ttl | undefined> {
   if (r.exitCode !== 0) return undefined
   const lines = r.stdout.split('\n')
   for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i]
+    const line = lines[i]!
     if (!line.includes('"cache_creation"')) continue
     let entry: { type?: string; isSidechain?: boolean; message?: { usage?: { cache_creation?: Record<string, number> } } }
     try {
