@@ -8,7 +8,7 @@ A collection of Claude Code function-hook plugins (mods).
 | --- | --- |
 | [state-compact](plugins/state-compact) | Keeps you from paying a large re-caching cost when you step away from a long session |
 
-The text shown at the end of answers and the prompts the mods send to Claude are in Korean.
+The text the mods show and the instructions they send to Claude are in Korean by default. For state-compact, set `language` to `en` (see [Settings](#settings)). The examples below show the English text.
 
 ## state-compact
 
@@ -30,27 +30,23 @@ When you return, only the compacted summary needs re-caching, and the details st
 When you send a message to a session whose cache has already expired and its context is 100K tokens or more, the message is held back once with the cost.
 
 ```
-state-compact: 캐시가 만료됐습니다. 보내면 컨텍스트 약 861k 토큰을 다시 캐시합니다(약 $6.88).
-그대로 보내려면 다시 보내고, 아니면 /compact나 새 세션을 쓰세요.
+state-compact: The cache has expired. Sending will re-cache about 861k tokens of context (about $6.88).
+Send again to go ahead, or use /compact or a new session.
 ```
-
-(The cache has expired. Sending will re-cache about 861k tokens of context (about $6.88). Send again to go ahead, or use /compact or a new session.)
 
 The held-back message is put back in the input box. Sending the same message again goes ahead, and slash commands such as `/compact` aren't held back.
 
 ### Other features
 
 - **Document update on manual compaction too.** When you type `/compact` or the context passes 85%, Claude is asked to update the handoff document before compacting.
-- **End-of-answer marks.** A small box at the end of the last answer shows the compaction and cache state. Press `취소` (cancel) on the scheduled line to cancel it.
+- **End-of-answer marks.** A small box at the end of the last answer shows the compaction and cache state. Press `Cancel` on the scheduled line to cancel it.
 
   ```
-  ◇ 압축 예정                     11:27  취소
-  ◆ 압축됨 · 자리 비움             11:27
-  ○ 캐시 만료 (컨텍스트 861k)       18:16
-  ✕ 압축 실패 · 이유               11:27
+  ◇ Compaction scheduled          11:27  Cancel
+  ◆ Compacted · away              11:27
+  ○ Cache expired (context 861k)  18:16
+  ✕ Compaction failed · reason    11:27
   ```
-
-  From the top: compaction scheduled, compacted (while away), cache expired (context size), compaction failed (reason).
 
 ## Install
 
@@ -83,6 +79,7 @@ To check the install, run `claude plugin validate <repo>/plugins/state-compact`.
 | Option | Default | Description |
 | --- | --- | --- |
 | `handoff_file` | (empty) | File to update before compaction, relative to the repository root. If empty, compacts without updating anything |
+| `language` | `ko` | Language of the end-of-answer marks, the warning, and the instructions sent to Claude. `ko` or `en` |
 
 Change them under the plugin's entries in `/config`, or in `pluginConfigs` in `settings.json`. When loaded with `--plugin-dir` or `CLAUDE_CODE_PLUGIN_DIRS`, the key is `state-compact` or `state-compact@inline`.
 
@@ -91,7 +88,8 @@ Change them under the plugin's entries in `/config`, or in `pluginConfigs` in `s
   "pluginConfigs": {
     "state-compact@inline": {
       "options": {
-        "handoff_file": "STATE.md"
+        "handoff_file": "STATE.md",
+        "language": "en"
       }
     }
   }
@@ -123,7 +121,7 @@ It's scheduled when a turn ends and all of the following hold.
 
 ### End-of-answer marks
 
-- Scheduled compaction and compaction in progress (`◆ 압축 중…`) appear only on the last answer
+- Scheduled compaction and compaction in progress (`◆ Compacting…`) appear only on the last answer
 - Compacted, cache expired, and compaction failed stay at the end of whichever answer was last at the time and are never removed
 - Cache expiry is shown once the TTL has passed since the last request, whatever the token count, unless the session was compacted first. The number in parentheses is the context size at expiry
 
@@ -141,6 +139,7 @@ Tested on the Windows desktop app: manual `/compact` → document update → com
 - The scheduled end-of-answer mark and its cancel button, the failed mark, and whether marks survive an app restart
 - Whether a held-back first message goes through when sent again, and whether a cache expiry that passed while the app was closed is added to the previous answer of a reopened session
 - Compaction at 85% context
+- The text and instructions with `language` set to `en`
 - 5-minute TTL sessions
 - The terminal CLI (function hooks were off in that build, so the mod didn't load)
 - macOS and Linux

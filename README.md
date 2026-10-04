@@ -77,6 +77,7 @@ claude --plugin-dir <repo>/plugins/state-compact
 | 항목 | 기본값 | 설명 |
 | --- | --- | --- |
 | `handoff_file` | (비어 있음) | 압축 전에 반영할 파일. 저장소 루트 기준 이름. 비우면 반영 없이 압축만 한다 |
+| `language` | `ko` | 답 끝 표시, 경고 문구, Claude에게 보내는 지시의 언어. `ko` 또는 `en` |
 
 `/config`의 플러그인 항목에서 바꾸거나, `settings.json`의 `pluginConfigs`에 적는다. `--plugin-dir`·`CLAUDE_CODE_PLUGIN_DIRS`로 불러온 경우 키는 `state-compact` 또는 `state-compact@inline`이다.
 
@@ -85,7 +86,8 @@ claude --plugin-dir <repo>/plugins/state-compact
   "pluginConfigs": {
     "state-compact@inline": {
       "options": {
-        "handoff_file": "STATE.md"
+        "handoff_file": "STATE.md",
+        "language": "ko"
       }
     }
   }
@@ -135,6 +137,7 @@ Windows 데스크톱 앱에서 수동 `/compact` → 문서 반영 → 압축 �
 - 답 끝 표시 중 압축 예정과 그 취소 버튼, 압축 실패, 그리고 앱을 재시작한 뒤에도 표시가 남는지
 - 막힌 첫 메시지를 다시 보냈을 때 통과하는지, 꺼져 있던 동안 지난 캐시 만료가 다시 연 세션의 이전 답에 붙는지
 - 85% 선제 압축
+- `language`를 `en`으로 바꿨을 때의 표시와 지시
 - 5분 TTL 세션
 - 터미널 CLI (함수 훅이 꺼진 빌드라 로드되지 않았다)
 - macOS·Linux

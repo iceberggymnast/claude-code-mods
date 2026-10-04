@@ -28,6 +28,80 @@ const MATCH_TAIL_CHARS = 80
 // 캐시가 만료된 세션을 다시 열어 첫 메시지를 보낼 때, 컨텍스트가 이 이상이면 한 번 막고 경고한다.
 const EXPIRED_WARN_TOKENS = 100_000
 
+// 화면에 내는 글자와 Claude에게 보내는 지시. 설정 language로 고른다.
+const KO = {
+  compacting: '◆ 압축 중…',
+  now: '지금',
+  scheduled: '◇ 압축 예정',
+  cancel: '취소',
+  compacted: (detail?: string) => `◆ 압축됨 · ${detail}`,
+  expired: (tokens?: number) => `○ 캐시 만료${tokens === undefined ? '' : ` (컨텍스트 ${Math.round(tokens / 1000)}k)`}`,
+  failed: (detail?: string) => `✕ 압축 실패 · ${detail}`,
+  auto: '자동',
+  manual: '수동',
+  away: '자리 비움',
+  contextLabel: (percent?: number) => `컨텍스트 ${percent}%`,
+  contextReason: (percent?: number) => `컨텍스트가 ${percent}%까지 찼다.`,
+  manualReason: '/compact를 실행했다.',
+  awayReason: '자리를 비운 사이 프롬프트 캐시가 곧 만료된다.',
+  compactAsTurn: '/compact 명령이 압축 대신 턴으로 처리됐다',
+  handoffUnfinished: (file: string) => `${file} 반영이 끝나지 않아 압축하지 않았다`,
+  compactSkipped: (skip: string) => `압축이 취소됐다 (${skip})`,
+  commandNoCompact: (out?: string) => `/compact 명령이 압축하지 않았다 (${out ?? '출력 없음'})`,
+  commandFailed: (err: string) => `/compact 명령을 실행하지 못했다 (${err})`,
+  compactFailed: (err: string) => `압축하지 못했다 (${err})`,
+  handoffFirst: (file: string) => `state-compact: ${file}을 먼저 반영한 뒤 압축합니다`,
+  expiredWarn: (tokens: number, usd: number | undefined, isFilled: boolean) =>
+    `state-compact: 캐시가 만료됐습니다. 보내면 컨텍스트 약 ${Math.round(tokens / 1000)}k 토큰을 다시 캐시합니다` +
+    `${usd === undefined ? '' : `(약 $${usd.toFixed(2)})`}. ` +
+    `그대로 보내려면 다시 보내고, 아니면 /compact나 새 세션을 쓰세요.${isFilled ? '' : ' 보낸 메시지는 입력창에 되돌리지 못했습니다.'}`,
+  handoffPrompt: (path: string, file: string, isTracked: boolean, reason: string) =>
+    [
+      `[state-compact] ${reason} 곧 대화를 압축한다. 압축하면 지금 대화의 세부 내용은 요약으로 바뀐다.`,
+      `압축 전에 ${path}에 지금까지 진행한 내용과 다음에 할 일을 반영하라.`,
+      isTracked
+        ? `${file}은 git이 추적하는 파일이다. \`git commit -- ${file}\` 형식으로 이 파일만 커밋하라. 다른 변경은 커밋에 넣지 마라.`
+        : `${file}은 git이 추적하지 않는 파일이다. 커밋하지 마라.`,
+      '그 밖의 작업은 하지 말고, 끝나면 무엇을 고쳤는지 한 줄로만 답하라.',
+    ].join('\n'),
+}
+const EN: typeof KO = {
+  compacting: '◆ Compacting…',
+  now: 'now',
+  scheduled: '◇ Compaction scheduled',
+  cancel: 'Cancel',
+  compacted: detail => `◆ Compacted · ${detail}`,
+  expired: tokens => `○ Cache expired${tokens === undefined ? '' : ` (context ${Math.round(tokens / 1000)}k)`}`,
+  failed: detail => `✕ Compaction failed · ${detail}`,
+  auto: 'auto',
+  manual: 'manual',
+  away: 'away',
+  contextLabel: percent => `context ${percent}%`,
+  contextReason: percent => `Context has reached ${percent}%.`,
+  manualReason: '/compact was run.',
+  awayReason: 'The prompt cache is about to expire while the user is away.',
+  compactAsTurn: '/compact ran as a turn instead of compacting',
+  handoffUnfinished: file => `not compacted because the ${file} update didn't finish`,
+  compactSkipped: skip => `compaction was cancelled (${skip})`,
+  commandNoCompact: out => `/compact didn't compact (${out ?? 'no output'})`,
+  commandFailed: err => `couldn't run /compact (${err})`,
+  compactFailed: err => `couldn't compact (${err})`,
+  handoffFirst: file => `state-compact: updating ${file} before compacting`,
+  expiredWarn: (tokens, usd, isFilled) =>
+    `state-compact: The cache has expired. Sending will re-cache about ${Math.round(tokens / 1000)}k tokens of context` +
+    `${usd === undefined ? '' : ` (about $${usd.toFixed(2)})`}. ` +
+    `Send again to go ahead, or use /compact or a new session.${isFilled ? '' : " Couldn't put your message back in the input box."}`,
+  handoffPrompt: (path, file, isTracked, reason) =>
+    [
+      `[state-compact] ${reason} The conversation will be compacted soon. Compaction replaces the details of this conversation with a summary.`,
+      `Before that, update ${path} with the progress so far and what to do next.`,
+      isTracked
+        ? `${file} is tracked by git. Commit only this file, as \`git commit -- ${file}\`. Don't include other changes in the commit.`
+        : `${file} isn't tracked by git. Don't commit it.`,
+      'Do nothing else, and when done reply in one line saying what you changed.',
+    ].join('\n'),
+}
+
 const CLASSIFY_SYSTEM =
   'You label the last message an AI coding assistant sent to its user. Reply with one word. ' +
   "WAIT: the message asks the user a question, asks for a decision or confirmation, or otherwise needs the user's reply before the work can go on. " +
@@ -65,6 +139,7 @@ let pendingInstructions: string | undefined
 let isAwaitingCompactPrompt = false
 // 사용자 설정(userConfig). handoffFile이 비어 있으면 문서 반영 없이 압축만 한다.
 let handoffFile = ''
+let msg = KO
 // 답(메시지 id)별 기록. $.store에 같이 써서 앱을 다시 켜도 남긴다.
 let marks = new Map<string, Mark[]>()
 // 마지막 답의 텍스트와, 그 답을 그리는 블록의 id. 진행 상태(압축 예정·압축 중)는 이 블록에만 붙인다.
@@ -77,6 +152,7 @@ let expiredResume: { tokens: number; usd?: number } | undefined
 
 export const register: Register = (on, options) => {
   handoffFile = String(options.handoff_file ?? '').trim()
+  msg = options.language === 'en' ? EN : KO
 
   on('session.start', async ($, e, next) => {
     const saved = await $.store.get('marks')
@@ -96,7 +172,7 @@ export const register: Register = (on, options) => {
     // 한 줄에 왼쪽은 항목, 오른쪽은 시각.
     const rows = (marks.get(e.requestId) ?? []).map(markRow)
     const isLast = e.requestId === lastId
-    if (isLast && isBusy) rows.push(['◆ 압축 중…', '지금'])
+    if (isLast && isBusy) rows.push([msg.compacting, msg.now])
     // 압축 예정 줄에는 예약을 푸는 버튼을 시각 오른쪽에 붙인다.
     const scheduledAt = isLast && !isBusy ? idleAt : undefined
     if (rows.length === 0 && scheduledAt === undefined) return drawn
@@ -113,10 +189,10 @@ export const register: Register = (on, options) => {
           ))}
           {scheduledAt !== undefined && (
             <Box flexDirection="row" justifyContent="space-between">
-              <Text dimColor>◇ 압축 예정</Text>
+              <Text dimColor>{msg.scheduled}</Text>
               <Box flexDirection="row" gap={1}>
                 <Text dimColor>{hhmm(scheduledAt)}</Text>
-                <Button key="cancel-idle" plain dimColor onPress={() => { cancelIdle(); redraw($) }}>취소</Button>
+                <Button key="cancel-idle" plain dimColor onPress={() => { cancelIdle(); redraw($) }}>{msg.cancel}</Button>
               </Box>
             </Box>
           )}
@@ -145,12 +221,7 @@ export const register: Register = (on, options) => {
     if (!warn || !isUser || e.text.trimStart().startsWith('/')) return next(e)
     expiredResume = undefined
     const { isFilled } = await $.prompt.fill({ text: e.text })
-    const cost = warn.usd === undefined ? '' : `(약 $${warn.usd.toFixed(2)})`
-    return {
-      drop:
-        `state-compact: 캐시가 만료됐습니다. 보내면 컨텍스트 약 ${Math.round(warn.tokens / 1000)}k 토큰을 다시 캐시합니다${cost}. ` +
-        `그대로 보내려면 다시 보내고, 아니면 /compact나 새 세션을 쓰세요.${isFilled ? '' : ' 보낸 메시지는 입력창에 되돌리지 못했습니다.'}`,
-    }
+    return { drop: msg.expiredWarn(warn.tokens, warn.usd, isFilled) }
   })
 
   on('classic.UserPromptSubmit', ($, e, next) => {
@@ -193,7 +264,7 @@ export const register: Register = (on, options) => {
     // 실행한 /compact가 압축 없이 턴으로 끝났다.
     if (isAwaitingCompactPrompt) {
       finish($)
-      notifyFailure($, '/compact 명령이 압축 대신 턴으로 처리됐다')
+      notifyFailure($, msg.compactAsTurn)
       return result
     }
 
@@ -203,7 +274,7 @@ export const register: Register = (on, options) => {
         $.clock.after(AFTER_TURN_MS, () => void compactNow($))
       } else {
         finish($)
-        notifyFailure($, `${handoffFile} 반영이 끝나지 않아 압축하지 않았다`)
+        notifyFailure($, msg.handoffUnfinished(handoffFile))
       }
       return result
     }
@@ -217,7 +288,7 @@ export const register: Register = (on, options) => {
 
     const { context } = await $.session.usage()
     if ((context.percent ?? 0) >= PREEMPT_PERCENT) {
-      $.clock.after(AFTER_TURN_MS, () => void begin($, `컨텍스트가 ${context.percent}%까지 찼다.`, `컨텍스트 ${context.percent}%`))
+      $.clock.after(AFTER_TURN_MS, () => void begin($, msg.contextReason(context.percent), msg.contextLabel(context.percent)))
       return result
     }
     // 기록 파일 읽기와 응답 대기 판정에 몇 초가 걸린다. 턴 종료를 붙잡지 않도록 기다리지 않는다.
@@ -228,7 +299,7 @@ export const register: Register = (on, options) => {
   // 메인 대화의 압축이 끝나면 그 시점의 마지막 답 끝에 남긴다. 어떤 경로로 압축됐든 같다.
   on('session.compact', async ($, e, next) => {
     if (e.agentId || e.trigger === 'precompute') return next(e)
-    const label = compactLabel ?? (e.trigger === 'auto' ? '자동' : '수동')
+    const label = compactLabel ?? (e.trigger === 'auto' ? msg.auto : msg.manual)
     const r = await next(e)
     if (r.skip) return r
     // 압축하면서 캐시를 새로 만들었으므로 이전 요청 기준의 만료 표시와 경고는 맞지 않다.
@@ -255,8 +326,8 @@ export const register: Register = (on, options) => {
       return next(e)
     }
     if (!(await findHandoffDoc($))) return next(e)
-    $.clock.after(AFTER_TURN_MS, () => void begin($, '/compact를 실행했다.', '수동', e.instructions))
-    return { skip: `state-compact: ${handoffFile}을 먼저 반영한 뒤 압축합니다` }
+    $.clock.after(AFTER_TURN_MS, () => void begin($, msg.manualReason, msg.manual, e.instructions))
+    return { skip: msg.handoffFirst(handoffFile) }
   })
 }
 
@@ -296,7 +367,7 @@ async function onIdle($: EngineInterface) {
   if ((await $.clock.now()) > lateAt) return
   // 입력창에 쓰던 글이 있으면 자리에 있는 것이다.
   if ((await $.prompt.read()).text.trim() !== '') return
-  await begin($, '자리를 비운 사이 프롬프트 캐시가 곧 만료된다.', '자리 비움')
+  await begin($, msg.awayReason, msg.away)
 }
 
 async function onExpire($: EngineInterface, expireAt: number) {
@@ -362,13 +433,13 @@ async function begin($: EngineInterface, reason: string, label: string, instruct
     return
   }
   isAwaitingHandoffTurn = true
-  await $.prompt.submit({ text: handoffPrompt(doc, reason) })
+  await $.prompt.submit({ text: msg.handoffPrompt(doc.path, handoffFile, doc.isTracked, reason) })
 }
 
 async function compactNow($: EngineInterface) {
   try {
     const r = await $.session.compact(pendingInstructions ? { instructions: pendingInstructions } : undefined)
-    if (r.skip) notifyFailure($, `압축이 취소됐다 (${r.skip})`)
+    if (r.skip) notifyFailure($, msg.compactSkipped(r.skip))
   } catch (err) {
     // SDK 세션(데스크톱 앱 등)은 플러그인의 압축 호출을 거절한다. /compact를 프롬프트로 넣어도
     // 큐에 들어가지 않았으므로 슬래시 명령으로 실행한다.
@@ -377,14 +448,14 @@ async function compactNow($: EngineInterface) {
       try {
         const r = await $.command.run({ command: 'compact', ...(pendingInstructions ? { args: pendingInstructions } : {}) })
         // 명령이 끝났는데 압축 훅을 지나지 않았다.
-        if (isAwaitingCompactPrompt) notifyFailure($, `/compact 명령이 압축하지 않았다 (${r.text ?? '출력 없음'})`)
+        if (isAwaitingCompactPrompt) notifyFailure($, msg.commandNoCompact(r.text))
       } catch (runErr) {
-        notifyFailure($, `/compact 명령을 실행하지 못했다 (${String(runErr)})`)
+        notifyFailure($, msg.commandFailed(String(runErr)))
       }
       finish($)
       return
     }
-    notifyFailure($, `압축하지 못했다 (${String(err)})`)
+    notifyFailure($, msg.compactFailed(String(err)))
   }
   finish($)
 }
@@ -422,12 +493,9 @@ function redraw($: EngineInterface) {
 }
 
 function markRow(mark: Mark): [string, string] {
-  if (mark.kind === 'compacted') return [`◆ 압축됨 · ${mark.detail}`, hhmm(mark.at)]
-  if (mark.kind === 'expired') {
-    const size = mark.tokens === undefined ? '' : ` (컨텍스트 ${Math.round(mark.tokens / 1000)}k)`
-    return [`○ 캐시 만료${size}`, hhmm(mark.at)]
-  }
-  return [`✕ 압축 실패 · ${mark.detail}`, hhmm(mark.at)]
+  if (mark.kind === 'compacted') return [msg.compacted(mark.detail), hhmm(mark.at)]
+  if (mark.kind === 'expired') return [msg.expired(mark.tokens), hhmm(mark.at)]
+  return [msg.failed(mark.detail), hhmm(mark.at)]
 }
 
 function hhmm(ms: number): string {
@@ -437,18 +505,6 @@ function hhmm(ms: number): string {
 
 function tail(text: string): string {
   return text.trim().slice(-MATCH_TAIL_CHARS)
-}
-
-function handoffPrompt(doc: HandoffDoc, reason: string): string {
-  const commit = doc.isTracked
-    ? `${handoffFile}은 git이 추적하는 파일이다. \`git commit -- ${handoffFile}\` 형식으로 이 파일만 커밋하라. 다른 변경은 커밋에 넣지 마라.`
-    : `${handoffFile}은 git이 추적하지 않는 파일이다. 커밋하지 마라.`
-  return [
-    `[state-compact] ${reason} 곧 대화를 압축한다. 압축하면 지금 대화의 세부 내용은 요약으로 바뀐다.`,
-    `압축 전에 ${doc.path}에 지금까지 진행한 내용과 다음에 할 일을 반영하라.`,
-    commit,
-    '그 밖의 작업은 하지 말고, 끝나면 무엇을 고쳤는지 한 줄로만 답하라.',
-  ].join('\n')
 }
 
 // 설정한 handoff 문서가 저장소 루트에 있으면 돌려준다. 설정이 비었거나 파일이 없으면 undefined.
