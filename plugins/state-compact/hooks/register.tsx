@@ -149,6 +149,8 @@ let lastId: string | undefined
 let pendingMarks: Mark[] = []
 // 다시 연 세션의 캐시가 만료돼 첫 메시지가 컨텍스트 전체를 다시 캐시한다. 경고하거나 턴이 시작되면 지운다.
 let expiredResume: { tokens: number; usd?: number } | undefined
+// 턴이 끝날 때 백그라운드 작업(서브에이전트, 백그라운드 셸 등)이 돌고 있었다. 끝나면 세션을 다시 깨운다.
+let hasBackgroundWork = false
 
 export const register: Register = (on, options) => {
   handoffFile = String(options.handoff_file ?? '').trim()
@@ -229,8 +231,10 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // Stop 훅은 턴을 이어 가게 할 수 있어 turn.complete보다 먼저 온다.
   on('classic.Stop', ($, e, next) => {
     transcriptPath = e.transcript_path
+    hasBackgroundWork = (e.background_tasks?.length ?? 0) > 0
     return next(e)
   })
 
@@ -242,6 +246,7 @@ export const register: Register = (on, options) => {
 
   on('turn.start', ($, e, next) => {
     expiredResume = undefined
+    hasBackgroundWork = false
     cancelIdle()
     cancelExpiry()
     if (isAwaitingHandoffTurn) {
@@ -331,8 +336,8 @@ export const register: Register = (on, options) => {
   })
 }
 
-// 캐시 만료 표시는 매 턴 예약한다. 만료 전 압축은 사용자의 답을 기다리는 턴에서만 예약한다.
-// 끝난 보고면 돌아올 가능성이 낮아 압축 비용만 남는다.
+// 캐시 만료 표시는 매 턴 예약한다. 만료 전 압축은 사용자의 답을 기다리는 턴이나 백그라운드 작업이
+// 돌고 있는 턴에서만 예약한다. 끝난 보고면 돌아올 가능성이 낮아 압축 비용만 남는다.
 async function scheduleTimers($: EngineInterface, tokens: number, answer: string) {
   cancelIdle()
   cancelExpiry()
@@ -346,7 +351,7 @@ async function scheduleTimers($: EngineInterface, tokens: number, answer: string
   expiryTimer = $.clock.after(Math.max(0, expireAt - (await $.clock.now())), () => void onExpire($, expireAt))
   const rule = IDLE_RULES[ttl]
   if (tokens < rule.minTokens) return
-  if (!(await isAwaitingReply($, answer))) return
+  if (!hasBackgroundWork && !(await isAwaitingReply($, answer))) return
   // 판정하는 몇 초 사이에 새 턴이 시작됐거나 압축이 진행 중이면 이 예약은 낡았다.
   if (lastRequestAt !== requestAt || isBusy) return
   const wait = rule.compactAfterMs - ((await $.clock.now()) - requestAt)

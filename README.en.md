@@ -18,7 +18,7 @@ This mod does two things.
 
 ### 1. Wraps up and compacts before the cache expires
 
-If you step away while Claude is waiting on a question, the mod acts just before the cache expires.
+If you step away while Claude is waiting on a question or on background work (a subagent, etc.), the mod acts just before the cache expires.
 
 1. It asks Claude to write the progress and next steps into a handoff document (e.g. `STATE.md`)
 2. When that turn ends, it compacts the conversation
@@ -107,7 +107,7 @@ It's scheduled when a turn ends and all of the following hold.
 | 1 hour | 200K tokens or more | 55 min after the last request |
 | 5 min | 300K tokens or more | 4 min after the last request |
 
-- Scheduled only when the last answer is waiting for your reply (a question, a request for confirmation). After a finished report you're less likely to return, so compaction would only add cost. This check calls Haiku once per turn, only when the context is over the threshold
+- Scheduled only when the last answer is waiting for your reply (a question, a request for confirmation), or when background work (a subagent, a background shell, etc.) is still running as the turn ends, since its completion wakes the session again. After a finished report you're less likely to return, so compaction would only add cost. Whether the answer waits for your reply is checked with Haiku, once per turn, only when there's no background work and the context is over the threshold
 - Skipped if there's unsent text in the prompt input, since that means you're there
 - Skipped if the machine wakes from sleep past the scheduled time, since the cache has already expired
 - The TTL is read from the last response in the session transcript. If it can't be read, nothing is scheduled
