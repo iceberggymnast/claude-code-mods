@@ -126,6 +126,10 @@ It's scheduled when a turn ends and all of the following hold.
 - Compacted, cache expired, and compaction failed stay at the end of whichever answer was last at the time and are never removed
 - Cache expiry is shown once the TTL has passed since the last request, whatever the token count, unless the session was compacted first. The number in parentheses is the context size at expiry
 
+### Decision log
+
+Why pre-expiry compaction wasn't scheduled, or was skipped, never shows up in the session transcript. So each decision made when a turn ends and at the scheduled time is written as one line to `<session id>.state-compact.log`, next to the transcript (`~/.claude/projects/<project>/<session id>.jsonl`). It holds the TTL, context token count, number of background tasks, the Haiku verdict and how long it took, and the reason for skipping, but no answer text. Past 250K characters the oldest lines are dropped.
+
 ## Limitations
 
 - Right after a resume or an app restart the mod doesn't know when the last request was sent, so until you send one request in that session it neither schedules compaction nor updates the document before a manual `/compact`. The cache-expired mark is based on the last response time instead: if the cache expired while the app was closed, the mark is added to the previous last answer when you next send a message in that session (the desktop app doesn't run the mod just for opening a session from the list), and its time is later than the real expiry by however long that response took

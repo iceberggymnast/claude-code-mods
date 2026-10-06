@@ -27,6 +27,8 @@ const MAX_MARKED_REPLIES = 200
 const MATCH_TAIL_CHARS = 80
 // 캐시가 만료된 세션을 다시 열어 첫 메시지를 보낼 때, 컨텍스트가 이 이상이면 한 번 막고 경고한다.
 const EXPIRED_WARN_TOKENS = 100_000
+// 판단 기록 파일의 최대 길이. 넘으면 앞부분부터 지운다($.fs는 4 MiB가 한도다).
+const DIAG_MAX_CHARS = 256_000
 
 // 화면에 내는 글자와 Claude에게 보내는 지시. 설정 language로 고른다.
 const KO = {
@@ -151,6 +153,8 @@ let pendingMarks: Mark[] = []
 let expiredResume: { tokens: number; usd?: number } | undefined
 // 턴이 끝날 때 백그라운드 작업(서브에이전트, 백그라운드 셸 등)이 돌고 있었다. 끝나면 세션을 다시 깨운다.
 let hasBackgroundWork = false
+// 판단 기록 쓰기를 차례로 잇는다. 읽고 덧붙여 다시 쓰므로 겹치면 줄이 사라진다.
+let diagWrite = Promise.resolve()
 
 export const register: Register = (on, options) => {
   handoffFile = String(options.handoff_file ?? '').trim()
@@ -234,7 +238,9 @@ export const register: Register = (on, options) => {
   // Stop 훅은 턴을 이어 가게 할 수 있어 turn.complete보다 먼저 온다.
   on('classic.Stop', ($, e, next) => {
     transcriptPath = e.transcript_path
-    hasBackgroundWork = (e.background_tasks?.length ?? 0) > 0
+    const tasks = e.background_tasks ?? []
+    hasBackgroundWork = tasks.length > 0
+    diag($, `stop bg=${tasks.length}${tasks.length > 0 ? ` (${tasks.map(t => t.type).join(',')})` : ''}`)
     return next(e)
   })
 
@@ -247,6 +253,7 @@ export const register: Register = (on, options) => {
   on('turn.start', ($, e, next) => {
     expiredResume = undefined
     hasBackgroundWork = false
+    if (idleAt !== undefined) diag($, `turn.start cancels idle at ${stamp(idleAt)}`)
     cancelIdle()
     cancelExpiry()
     if (isAwaitingHandoffTurn) {
@@ -260,6 +267,7 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (e.agentId) return result
+    diag($, `turn.complete reason=${e.reason} busy=${isBusy} bg=${hasBackgroundWork}`)
     if (e.answer.trim()) {
       lastAnswer = e.answer
       lastId = undefined
@@ -293,6 +301,7 @@ export const register: Register = (on, options) => {
 
     const { context } = await $.session.usage()
     if ((context.percent ?? 0) >= PREEMPT_PERCENT) {
+      diag($, `preempt percent=${context.percent}`)
       $.clock.after(AFTER_TURN_MS, () => void begin($, msg.contextReason(context.percent), msg.contextLabel(context.percent)))
       return result
     }
@@ -343,22 +352,28 @@ async function scheduleTimers($: EngineInterface, tokens: number, answer: string
   cancelExpiry()
   redraw($)
   const requestAt = lastRequestAt
-  if (requestAt === undefined) return
+  if (requestAt === undefined) return diag($, 'schedule: no request in this process')
+  const at = `schedule req=${stamp(requestAt)}`
   // 마지막 응답이 실제로 캐시된 TTL. 확인하지 못하면 예약하지 않는다.
   const ttl = await readTtl($)
-  if (!ttl || lastRequestAt !== requestAt || isBusy) return
+  if (!ttl || lastRequestAt !== requestAt || isBusy) {
+    return diag($, `${at} stop ttl=${ttl} stale=${lastRequestAt !== requestAt} busy=${isBusy}`)
+  }
   const expireAt = requestAt + (ttl === '1h' ? ONE_HOUR_MS : FIVE_MIN_MS)
   expiryTimer = $.clock.after(Math.max(0, expireAt - (await $.clock.now())), () => void onExpire($, expireAt))
   const rule = IDLE_RULES[ttl]
-  if (tokens < rule.minTokens) return
-  if (!hasBackgroundWork && !(await isAwaitingReply($, answer))) return
+  if (tokens < rule.minTokens) return diag($, `${at} ttl=${ttl} tokens=${tokens} below ${rule.minTokens}`)
+  if (!hasBackgroundWork && !(await isAwaitingReply($, answer))) return diag($, `${at} ttl=${ttl} tokens=${tokens} not waiting, no bg`)
   // 판정하는 몇 초 사이에 새 턴이 시작됐거나 압축이 진행 중이면 이 예약은 낡았다.
-  if (lastRequestAt !== requestAt || isBusy) return
+  if (lastRequestAt !== requestAt || isBusy) {
+    return diag($, `${at} stop after check stale=${lastRequestAt !== requestAt} busy=${isBusy}`)
+  }
   const wait = rule.compactAfterMs - ((await $.clock.now()) - requestAt)
-  if (wait <= 0) return
+  if (wait <= 0) return diag($, `${at} too late wait=${wait}ms`)
   idleAt = requestAt + rule.compactAfterMs
   idleLateAt = requestAt + rule.lateLimitMs
   idleTimer = $.clock.after(wait, () => void onIdle($))
+  diag($, `${at} ttl=${ttl} tokens=${tokens} bg=${hasBackgroundWork} idle at ${stamp(idleAt)}`)
   redraw($)
 }
 
@@ -368,10 +383,12 @@ async function onIdle($: EngineInterface) {
   idleAt = undefined
   idleLateAt = undefined
   redraw($)
-  if (isBusy || lateAt === undefined) return
-  if ((await $.clock.now()) > lateAt) return
+  if (isBusy || lateAt === undefined) return diag($, `idle: skip busy=${isBusy} lateAt=${lateAt}`)
+  const now = await $.clock.now()
+  if (now > lateAt) return diag($, `idle: skip, fired ${Math.round((now - lateAt) / 1000)}s past late limit`)
   // 입력창에 쓰던 글이 있으면 자리에 있는 것이다.
-  if ((await $.prompt.read()).text.trim() !== '') return
+  if ((await $.prompt.read()).text.trim() !== '') return diag($, 'idle: skip, prompt has text')
+  diag($, 'idle: begin')
   await begin($, msg.awayReason, msg.away)
 }
 
@@ -483,6 +500,7 @@ function notifyFailure($: EngineInterface, text: string) {
 // 지금 마지막 답에 기록을 붙인다. 답은 알지만 블록을 아직 못 찾았으면 찾을 때 붙이고,
 // 답도 모르면(재시작 직후 턴 전) 남기지 않는다.
 async function addMark($: EngineInterface, mark: Mark) {
+  diag($, `mark ${mark.kind} at=${stamp(mark.at)}${mark.detail ? ` ${mark.detail}` : ''}${mark.tokens === undefined ? '' : ` tokens=${mark.tokens}`}`)
   if (lastId === undefined) {
     if (lastAnswer !== undefined) pendingMarks.push(mark)
     return
@@ -512,6 +530,28 @@ function tail(text: string): string {
   return text.trim().slice(-MATCH_TAIL_CHARS)
 }
 
+function stamp(ms: number): string {
+  const d = new Date(ms)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+// 만료 전 압축을 예약하지 않거나 건너뛴 이유는 세션 기록에 남지 않는다. 판단마다 한 줄을
+// 세션 기록 파일 옆(<세션 id>.state-compact.log)에 덧붙인다. 답 본문은 넣지 않는다.
+function diag($: EngineInterface, text: string) {
+  // 이름이 다르면 세션 기록 파일 자체를 덮어쓰게 되므로 남기지 않는다.
+  if (!transcriptPath?.endsWith('.jsonl')) return
+  const path = `${transcriptPath.slice(0, -'.jsonl'.length)}.state-compact.log`
+  diagWrite = diagWrite
+    .then(async () => {
+      const line = `${stamp(await $.clock.now())} ${text}\n`
+      const all = (await $.fs.read(path).catch(() => '')) + line
+      const cut = all.length > DIAG_MAX_CHARS ? all.indexOf('\n', all.length - DIAG_MAX_CHARS) + 1 : 0
+      await $.fs.write(path, all.slice(cut))
+    })
+    .catch(() => {})
+}
+
 // 설정한 handoff 문서가 저장소 루트에 있으면 돌려준다. 설정이 비었거나 파일이 없으면 undefined.
 async function findHandoffDoc($: EngineInterface): Promise<HandoffDoc | undefined> {
   if (!handoffFile) return undefined
@@ -527,6 +567,7 @@ async function findHandoffDoc($: EngineInterface): Promise<HandoffDoc | undefine
 
 async function isAwaitingReply($: EngineInterface, answer: string): Promise<boolean> {
   if (!answer.trim()) return false
+  const startAt = await $.clock.now()
   const r = await $.model.complete({
     model: 'haiku',
     system: CLASSIFY_SYSTEM,
@@ -534,6 +575,8 @@ async function isAwaitingReply($: EngineInterface, answer: string): Promise<bool
     maxTokens: 5,
     timeoutMs: 30_000,
   })
+  const result = r.isAnswered ? JSON.stringify(r.text.trim()) : r.reason === 'api-error' ? `api-error ${r.status} ${r.error}` : r.reason
+  diag($, `haiku ${(await $.clock.now()) - startAt}ms ${result}`)
   // 판정하지 못하면 압축하지 않는다. 요약 손실을 감수할 근거가 없다.
   return r.isAnswered && r.text.trim().toUpperCase().startsWith('WAIT')
 }
@@ -548,7 +591,10 @@ async function readTtl($: EngineInterface): Promise<Ttl | undefined> {
         env: { STATE_COMPACT_TRANSCRIPT: transcriptPath },
       })
     : await $.process.run(['tail', '-c', String(TRANSCRIPT_TAIL_BYTES), transcriptPath])
-  if (r.exitCode !== 0) return undefined
+  if (r.exitCode !== 0) {
+    diag($, `ttl: tail exit=${r.exitCode} ${r.stderr.trim().slice(0, 200)}`)
+    return undefined
+  }
   const lines = r.stdout.split('\n')
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!
@@ -564,5 +610,6 @@ async function readTtl($: EngineInterface): Promise<Ttl | undefined> {
     if ((cc.ephemeral_1h_input_tokens ?? 0) > 0) return '1h'
     if ((cc.ephemeral_5m_input_tokens ?? 0) > 0) return '5m'
   }
+  diag($, `ttl: no main cache_creation in last ${lines.length} lines`)
   return undefined
 }
