@@ -1,0 +1,5 @@
+{
+  "name": "token-speedometer",
+  "version": "0.1.0",
+  "description": "응답이 나오는 속도(초당 출력 토큰)를 입력창 위에 속도계처럼 보여 준다"
+}

@@ -7,6 +7,7 @@ A collection of Claude Code function-hook plugins (mods).
 | Mod | What it does |
 | --- | --- |
 | [state-compact](plugins/state-compact) | Keeps you from paying a large re-caching cost when you step away from a long session |
+| [token-speedometer](plugins/token-speedometer) | Shows how fast the answer is being output as a racing-game speedometer above the prompt |
 
 The text the mods show and the instructions they send to Claude are in Korean by default. For state-compact, set `language` to `en` (see [Settings](#settings)). The examples below show the English text.
 
@@ -144,6 +145,43 @@ Tested on the Windows desktop app: manual `/compact` → document update → com
 - The terminal CLI (function hooks were off in that build, so the mod didn't load)
 - macOS and Linux
 - Whether the mod loads when installed from the marketplace (`claude plugin marketplace add`)
+
+## token-speedometer
+
+Shows how fast the answer is being output (tokens per second) as a racing-game speedometer above the prompt.
+
+- **Big number**: the current speed. Leading zeros are drawn dim
+- **Bar**: 0–200 tok/s, red from 160. Three segments stay lit even at 0. The triangle marks this turn's top speed
+- **Gear**: which model request of this turn it is (green). `N` while thinking or running tools, `P` once the turn ends (red)
+- **Lamps**: `REQ` waiting for a response · `THK` thinking · `OUT` outputting · `TOOL` running tools
+- **AVG · TOP · LAUNCH**: the average of finished responses, this turn's top speed, and the time until the first chunk arrived
+
+When the turn ends, the number and the bar fall to 0 and the gear stays at `P`. Install it as in [Install](#install), giving the folder `<repo>/plugins/token-speedometer`. It has no settings. The speedometer's labels are in English; the terminal line and the image's alt text are in Korean.
+
+### How speed is measured
+
+So the numbers can be compared with model comparison charts, speed is measured the way [Artificial Analysis](https://artificialanalysis.ai/methodology/performance-benchmarking) measures output speed.
+
+- Tokens are counted with OpenAI's `o200k_base`, not Claude's tokenizer. The answer shown on screen (text and tool input) is estimated by a per-character cost by character type: Hangul 0.90, ASCII letters and digits 0.25, whitespace 0.10, ASCII symbols 0.61, anything else 1.0 tokens per character. These were fitted against `tiktoken` on 6,000 answers from Claude Code session logs; on 6,000 held-out answers the total error was -0.6%, and within ±4% when split by the share of Hangul
+- Thinking is left out; only the time the answer is being output counts. While thinking or running tools, the number falls toward 0
+- The current speed is taken over the last second. It updates 10 times a second and moves 30% of the way each time, so the number steps up and down rather than jumping
+- Subagent responses are not counted
+
+Artificial Analysis leaves out the first 20% of answer chunks; this mod measures from the start. Serving conditions and effort differ too, so the numbers won't match the chart exactly.
+
+### Limitations
+
+- The desktop app redraws a plugin's image at most 10 times a second, so motion between updates can't be drawn. SVG animation only runs in interactive images (`isInteractive`), which flicker and shrink on every update, so they aren't used
+- In the terminal it shows a text bar and the numbers on one line instead of the image
+- Light and dark mode are told apart by `prefers-color-scheme` inside the image
+
+### Tested
+
+Tested on the Windows desktop app in light mode: the speedometer, phase and gear changes, falling to 0 and staying at `P` after the turn ends, and shrinking in proportion when the window is narrowed. Not yet tested:
+
+- Whether the colors change in dark mode
+- The terminal CLI display
+- macOS and Linux
 
 ## License
 
