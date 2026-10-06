@@ -177,7 +177,7 @@ Artificial Analysis leaves out the first 20% of answer chunks; this mod measures
 
 ### Tested
 
-Tested on the Windows desktop app in light mode: the speedometer, phase and gear changes, falling to 0 and staying at `P` after the turn ends, and shrinking in proportion when the window is narrowed. Not yet tested:
+Tested on the Windows desktop app in light mode: the speedometer, phase and gear changes, slowing down as soon as output ends, falling to 0 and staying at `P` after the turn ends, and shrinking in proportion when the window is narrowed. Not yet tested:
 
 - Whether the colors change in dark mode
 - The terminal CLI display

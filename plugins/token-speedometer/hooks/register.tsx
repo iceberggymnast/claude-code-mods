@@ -23,6 +23,8 @@ const O200K_PER_SPACE = 0.1001
 const O200K_PER_PUNCT = 0.6116
 const O200K_PER_OTHER = 1
 
+// 글자는 UTF-16 단위로 센다. 비용은 코드 포인트 단위로 맞췄으므로 이모지(2단위)는 두 배로 잡히고,
+// U+3000 같은 유니코드 공백은 기타로 센다. Claude Code의 답에는 드물어 오차에 거의 들어가지 않는다.
 function o200kTokens(text: string): number {
   let n = 0
   for (let i = 0; i < text.length; i++) {
