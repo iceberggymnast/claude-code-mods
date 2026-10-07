@@ -29,6 +29,12 @@ const MATCH_TAIL_CHARS = 80
 const EXPIRED_WARN_TOKENS = 100_000
 // 판단 기록 파일의 최대 길이. 넘으면 앞부분부터 지운다($.fs는 4 MiB가 한도다).
 const DIAG_MAX_CHARS = 256_000
+// 캐시 연장 횟수의 상한을 정하는 값. 입력 단가 대비 1시간 캐시 쓰기와 캐시 읽기의 배율이다.
+const WRITE_1H_RATE = 2
+const READ_RATE = 0.1
+// 시스템 프롬프트와 도구 정의. 다른 세션도 같은 내용을 보내 만료되지 않으므로 만료 때 다시 쓰지 않는다.
+// 10-07 두 세션에서 만료 뒤 첫 요청의 캐시 읽기가 43,698이었다.
+const SHARED_PREFIX_TOKENS = 44_000
 
 // 화면에 내는 글자와 Claude에게 보내는 지시. 설정 language로 고른다.
 const KO = {
@@ -38,6 +44,7 @@ const KO = {
   cancel: '취소',
   compacted: (detail?: string) => `◆ 압축됨 · ${detail}`,
   expired: (tokens?: number) => `○ 캐시 만료${tokens === undefined ? '' : ` (컨텍스트 ${Math.round(tokens / 1000)}k)`}`,
+  kept: (tokens?: number) => `↻ 캐시 연장${tokens === undefined ? '' : ` (읽기 ${Math.round(tokens / 1000)}k)`}`,
   failed: (detail?: string) => `✕ 압축 실패 · ${detail}`,
   auto: '자동',
   manual: '수동',
@@ -53,6 +60,7 @@ const KO = {
   commandFailed: (err: string) => `/compact 명령을 실행하지 못했다 (${err})`,
   compactFailed: (err: string) => `압축하지 못했다 (${err})`,
   handoffFirst: (file: string) => `state-compact: ${file}을 먼저 반영한 뒤 압축합니다`,
+  keepalivePrompt: '[state-compact] 프롬프트 캐시를 연장하려고 보낸 요청이다. 도구를 쓰지 말고 OK 한 단어로만 답하라.',
   expiredWarn: (tokens: number, usd: number | undefined, isFilled: boolean) =>
     `state-compact: 캐시가 만료됐습니다. 보내면 컨텍스트 약 ${Math.round(tokens / 1000)}k 토큰을 다시 캐시합니다` +
     `${usd === undefined ? '' : `(약 $${usd.toFixed(2)})`}. ` +
@@ -74,6 +82,7 @@ const EN: typeof KO = {
   cancel: 'Cancel',
   compacted: detail => `◆ Compacted · ${detail}`,
   expired: tokens => `○ Cache expired${tokens === undefined ? '' : ` (context ${Math.round(tokens / 1000)}k)`}`,
+  kept: tokens => `↻ Cache kept alive${tokens === undefined ? '' : ` (read ${Math.round(tokens / 1000)}k)`}`,
   failed: detail => `✕ Compaction failed · ${detail}`,
   auto: 'auto',
   manual: 'manual',
@@ -89,6 +98,7 @@ const EN: typeof KO = {
   commandFailed: err => `couldn't run /compact (${err})`,
   compactFailed: err => `couldn't compact (${err})`,
   handoffFirst: file => `state-compact: updating ${file} before compacting`,
+  keepalivePrompt: '[state-compact] This request only keeps the prompt cache alive. Use no tools and reply with the single word OK.',
   expiredWarn: (tokens, usd, isFilled) =>
     `state-compact: The cache has expired. Sending will re-cache about ${Math.round(tokens / 1000)}k tokens of context` +
     `${usd === undefined ? '' : ` (about $${usd.toFixed(2)})`}. ` +
@@ -119,8 +129,8 @@ const TAIL_POWERSHELL =
 type Ttl = '1h' | '5m'
 type HandoffDoc = { path: string; isTracked: boolean }
 // 답 끝에 남기는 기록. 그 답에 붙은 채로 지우지 않는다.
-// tokens는 캐시 만료 때의 컨텍스트 크기다.
-type Mark = { kind: 'compacted' | 'expired' | 'failed'; at: number; detail?: string; tokens?: number }
+// tokens는 캐시 만료 때의 컨텍스트 크기, 캐시 연장 때 읽은 양이다.
+type Mark = { kind: 'compacted' | 'expired' | 'kept' | 'failed'; at: number; detail?: string; tokens?: number }
 
 // 이 프로세스에서 마지막으로 보낸 메인 요청의 시작 시각. resume·재시작 직후에는 없으므로
 // 그때는 만료 전 압축도, 수동 압축 앞의 반영 턴도 하지 않는다.
@@ -130,6 +140,9 @@ let idleTimer: { cancel: () => void } | undefined
 let idleAt: number | undefined
 let idleLateAt: number | undefined
 let expiryTimer: { cancel: () => void } | undefined
+let keepaliveTimer: { cancel: () => void } | undefined
+// 메인 턴이 시작될 때마다 늘린다. 캐시 연장 요청을 기다리는 사이 턴이 시작됐는지 가린다.
+let turnSeq = 0
 // handoff 문서 반영 → 압축 순서가 진행 중이다.
 let isBusy = false
 // 진행 중인 압축을 답 끝에 적을 때의 이유. 플러그인이 시작한 압축에만 있다.
@@ -253,9 +266,11 @@ export const register: Register = (on, options) => {
   on('turn.start', ($, e, next) => {
     expiredResume = undefined
     hasBackgroundWork = false
+    turnSeq++
     if (idleAt !== undefined) diag($, `turn.start cancels idle at ${stamp(idleAt)}`)
     cancelIdle()
     cancelExpiry()
+    cancelKeepalive()
     if (isAwaitingHandoffTurn) {
       isAwaitingHandoffTurn = false
       handoffTurnId = e.turnId
@@ -318,6 +333,7 @@ export const register: Register = (on, options) => {
     if (r.skip) return r
     // 압축하면서 캐시를 새로 만들었으므로 이전 요청 기준의 만료 표시와 경고는 맞지 않다.
     cancelExpiry()
+    cancelKeepalive()
     expiredResume = undefined
     await addMark($, { kind: 'compacted', at: await $.clock.now(), detail: label })
     return r
@@ -350,6 +366,7 @@ export const register: Register = (on, options) => {
 async function scheduleTimers($: EngineInterface, tokens: number, answer: string) {
   cancelIdle()
   cancelExpiry()
+  cancelKeepalive()
   redraw($)
   const requestAt = lastRequestAt
   if (requestAt === undefined) return diag($, 'schedule: no request in this process')
@@ -362,7 +379,11 @@ async function scheduleTimers($: EngineInterface, tokens: number, answer: string
   const expireAt = requestAt + (ttl === '1h' ? ONE_HOUR_MS : FIVE_MIN_MS)
   expiryTimer = $.clock.after(Math.max(0, expireAt - (await $.clock.now())), () => void onExpire($, expireAt))
   const rule = IDLE_RULES[ttl]
-  if (tokens < rule.minTokens) return diag($, `${at} ttl=${ttl} tokens=${tokens} below ${rule.minTokens}`)
+  if (tokens < rule.minTokens) {
+    // 압축하기엔 작지만 백그라운드 작업이 끝나면 세션이 돌아온다. 그때까지 캐시를 연장한다.
+    if (ttl === '1h' && hasBackgroundWork) void scheduleKeepalive($, requestAt, tokens, 0)
+    return diag($, `${at} ttl=${ttl} tokens=${tokens} below ${rule.minTokens}`)
+  }
   if (!hasBackgroundWork && !(await isAwaitingReply($, answer))) return diag($, `${at} ttl=${ttl} tokens=${tokens} not waiting, no bg`)
   // 판정하는 몇 초 사이에 새 턴이 시작됐거나 압축이 진행 중이면 이 예약은 낡았다.
   if (lastRequestAt !== requestAt || isBusy) {
@@ -408,7 +429,7 @@ async function restoreExpiry($: EngineInterface, secondsSinceResponse: number, t
   if (!ttl) return
   // 꺼지기 전에 만료나 압축을 이미 남겼으면 다시 남기지 않는다.
   const saved = (await $.store.get('marks')) as Record<string, Mark[]> | undefined
-  if (Object.values(saved ?? {}).flat().some(m => m.kind !== 'failed' && m.at >= respondedAt)) return
+  if (Object.values(saved ?? {}).flat().some(m => (m.kind === 'compacted' || m.kind === 'expired') && m.at >= respondedAt)) return
   const messages = await $.session.messages()
   if (!Array.isArray(messages)) return
   // 새 메시지의 답이 아직 안 왔으면 다시 열기 전의 마지막 답에 붙인다.
@@ -439,6 +460,58 @@ function cancelIdle() {
 function cancelExpiry() {
   expiryTimer?.cancel()
   expiryTimer = undefined
+}
+
+function cancelKeepalive() {
+  keepaliveTimer?.cancel()
+  keepaliveTimer = undefined
+}
+
+// 캐시가 만료되면 돌아왔을 때 대화 부분을 1시간 단가로 다시 쓴다. 연장 1회는 컨텍스트 전체의 캐시 읽기다.
+// 연장 비용의 합이 만료 때 더 내는 양을 넘지 않는 횟수까지만 보낸다. 150k에서 13회, 100k에서 10회다.
+function keepaliveLimit(tokens: number): number {
+  return Math.floor(((WRITE_1H_RATE - READ_RATE) * (tokens - SHARED_PREFIX_TOKENS)) / (READ_RATE * tokens))
+}
+
+// baseAt은 캐시를 마지막으로 읽거나 쓴 요청의 시작 시각, sent는 이번 대기에서 보낸 연장 횟수다.
+async function scheduleKeepalive($: EngineInterface, baseAt: number, tokens: number, sent: number) {
+  cancelKeepalive()
+  const limit = keepaliveLimit(tokens)
+  if (sent >= limit) return diag($, `keepalive: stop ${sent}/${limit} tokens=${tokens}`)
+  // 만료 전 압축과 같은 시각 기준을 쓴다. 만료 전에 요청이 나가야 하고, 절전에서 늦게 깨면 건너뛴다.
+  const { compactAfterMs, lateLimitMs } = IDLE_RULES['1h']
+  const wait = baseAt + compactAfterMs - (await $.clock.now())
+  if (wait <= 0) return diag($, `keepalive: too late wait=${wait}ms`)
+  const seq = turnSeq
+  keepaliveTimer = $.clock.after(wait, () => void keepalive($, seq, baseAt + lateLimitMs, tokens, sent + 1, limit))
+  diag($, `keepalive: ${sent + 1}/${limit} at ${stamp(baseAt + compactAfterMs)} tokens=${tokens}`)
+}
+
+async function keepalive($: EngineInterface, seq: number, lateAt: number, tokens: number, count: number, limit: number) {
+  keepaliveTimer = undefined
+  if (isBusy || seq !== turnSeq) return diag($, `keepalive: skip busy=${isBusy} stale=${seq !== turnSeq}`)
+  const sentAt = await $.clock.now()
+  if (sentAt > lateAt) return diag($, `keepalive: skip, fired ${Math.round((sentAt - lateAt) / 1000)}s past late limit`)
+  const r = await $.model.fork({ prompt: msg.keepalivePrompt })
+  if (!r.isAnswered) {
+    return diag($, `keepalive: no reply ${r.reason === 'api-error' ? `api-error ${r.status} ${r.error}` : r.reason}`)
+  }
+  const u = r.usage
+  diag(
+    $,
+    `keepalive ${count}/${limit} ${(await $.clock.now()) - sentAt}ms read=${u.cache_read_input_tokens} ` +
+      `write=${u.cache_creation_input_tokens} in=${u.input_tokens} out=${u.output_tokens}`,
+  )
+  // 기다리는 사이 턴이 시작됐으면 그 턴이 예약한다.
+  if (seq !== turnSeq) return
+  // 캐시를 거의 읽지 못했으면 연장이 아니라 전체를 다시 쓴 것이다. 같은 비용이 반복되지 않게 멈춘다.
+  if (u.cache_read_input_tokens < tokens / 2) return diag($, 'keepalive: stop, cache miss')
+  await addMark($, { kind: 'kept', at: sentAt, tokens: u.cache_read_input_tokens })
+  // 만료 표시를 이 요청 기준으로 옮긴다.
+  cancelExpiry()
+  const expireAt = sentAt + ONE_HOUR_MS
+  expiryTimer = $.clock.after(Math.max(0, expireAt - (await $.clock.now())), () => void onExpire($, expireAt))
+  await scheduleKeepalive($, sentAt, tokens, count)
 }
 
 async function begin($: EngineInterface, reason: string, label: string, instructions?: string) {
@@ -518,6 +591,7 @@ function redraw($: EngineInterface) {
 function markRow(mark: Mark): [string, string] {
   if (mark.kind === 'compacted') return [msg.compacted(mark.detail), hhmm(mark.at)]
   if (mark.kind === 'expired') return [msg.expired(mark.tokens), hhmm(mark.at)]
+  if (mark.kind === 'kept') return [msg.kept(mark.tokens), hhmm(mark.at)]
   return [msg.failed(mark.detail), hhmm(mark.at)]
 }
 

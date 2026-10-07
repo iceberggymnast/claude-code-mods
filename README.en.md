@@ -40,11 +40,13 @@ The held-back message is put back in the input box. Sending the same message aga
 ### Other features
 
 - **Document update on manual compaction too.** When you type `/compact` or the context passes 85%, Claude is asked to update the handoff document before compacting.
+- **Keeping the cache alive during background work.** While a session below the compaction threshold waits on background work, a short request is sent just before each expiry to keep the cache alive. When the work finishes and the session wakes up, the context isn't cached again.
 - **End-of-answer marks.** A small box at the end of the last answer shows the compaction and cache state. Press `Cancel` on the scheduled line to cancel it.
 
   ```
   ◇ Compaction scheduled          11:27  Cancel
   ◆ Compacted · away              11:27
+  ↻ Cache kept alive (read 157k)  17:18
   ○ Cache expired (context 861k)  18:16
   ✕ Compaction failed · reason    11:27
   ```
@@ -113,6 +115,15 @@ It's scheduled when a turn ends and all of the following hold.
 - Skipped if the machine wakes from sleep past the scheduled time, since the cache has already expired
 - The TTL is read from the last response in the session transcript. If it can't be read, nothing is scheduled
 
+### When the cache is kept alive
+
+In a 1-hour TTL session, if background work is running when a turn ends and the context is below the compaction threshold (200K tokens), a keep-alive request is sent 55 minutes after the last request. It resends the main conversation as is, followed by "reply with OK only", with no tools. It isn't added to the conversation. If it succeeds, the next one is scheduled 55 minutes after it.
+
+- One keep-alive costs a cache read of the whole context (0.1× the input price). If the cache expires, the conversation part is written again at the 1-hour cache price (2×) on return. Keep-alives are sent only up to the count whose total stays below that difference: 13 at 150K tokens, 10 at 100K
+- The system prompt and tool definitions (about 44K tokens) are shared with other sessions and don't expire, so they're left out of this calculation
+- Stops if a keep-alive read less than half of the context from the cache
+- Cancelled when a turn starts or the session is compacted. Skipped if the machine wakes from sleep past the scheduled time
+
 ### Handoff document update
 
 - Summary instructions passed to a manual `/compact` are kept for the compaction
@@ -123,12 +134,13 @@ It's scheduled when a turn ends and all of the following hold.
 ### End-of-answer marks
 
 - Scheduled compaction and compaction in progress (`◆ Compacting…`) appear only on the last answer
-- Compacted, cache expired, and compaction failed stay at the end of whichever answer was last at the time and are never removed
-- Cache expiry is shown once the TTL has passed since the last request, whatever the token count, unless the session was compacted first. The number in parentheses is the context size at expiry
+- Compacted, cache kept alive, cache expired, and compaction failed stay at the end of whichever answer was last at the time and are never removed
+- Cache expiry is shown once the TTL has passed since the last request, whatever the token count, unless the session was compacted first. The number in parentheses is the context size at expiry. If the cache was kept alive, it's shown once the TTL has passed since the last keep-alive
+- The number in parentheses on cache kept alive is how many tokens that request read from the cache
 
 ### Decision log
 
-Why pre-expiry compaction wasn't scheduled, or was skipped, never shows up in the session transcript. So each decision made when a turn ends and at the scheduled time is written as one line to `<session id>.state-compact.log`, next to the transcript (`~/.claude/projects/<project>/<session id>.jsonl`). It holds the TTL, context token count, number of background tasks, the Haiku verdict and how long it took, and the reason for skipping, but no answer text. Past 250K characters the oldest lines are dropped.
+Why pre-expiry compaction wasn't scheduled, or was skipped, never shows up in the session transcript. So each decision made when a turn ends and at the scheduled time is written as one line to `<session id>.state-compact.log`, next to the transcript (`~/.claude/projects/<project>/<session id>.jsonl`). It holds the TTL, context token count, number of background tasks, the Haiku verdict and how long it took, the cache read and write token counts of keep-alive requests, and the reason for skipping, but no answer text. Past 250K characters the oldest lines are dropped.
 
 ## Limitations
 
@@ -144,6 +156,7 @@ Tested on the Windows desktop app: manual `/compact` → document update → com
 - The scheduled end-of-answer mark and its cancel button, the failed mark, and whether marks survive an app restart
 - Whether a held-back first message goes through when sent again, and whether a cache expiry that passed while the app was closed is added to the previous answer of a reopened session
 - Compaction at 85% context
+- Keeping the cache alive as a whole: whether a keep-alive actually extends the TTL, and whether the first request reads from the cache when the session wakes after background work finishes
 - The text and instructions with `language` set to `en`
 - 5-minute TTL sessions
 - The terminal CLI (function hooks were off in that build, so the mod didn't load)
