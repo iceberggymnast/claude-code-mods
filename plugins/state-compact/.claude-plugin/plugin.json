@@ -9,6 +9,14 @@
       "description": "압축 전에 Claude가 진행 상황을 반영할 파일. 저장소 루트 기준 이름(예: STATE.md, HANDOFF.md). 비우면 반영 없이 압축만 한다.",
       "default": ""
     },
+    "preempt_percent": {
+      "type": "number",
+      "title": "선제 압축 비율(%)",
+      "description": "컨텍스트가 압축 창의 이 비율을 넘기면 자동 압축 전에 handoff 문서를 반영하고 먼저 압축한다. 압축 창은 autoCompactWindow나 /autocompact로 정한 값이고, 정하지 않았으면 모델의 컨텍스트 창이다. 자동 압축은 창보다 약 3.3만 토큰 앞에서 실행되므로 그보다 낮게 둔다.",
+      "default": 85,
+      "min": 1,
+      "max": 100
+    },
     "language": {
       "type": "string",
       "title": "언어",

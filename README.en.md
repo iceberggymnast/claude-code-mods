@@ -39,7 +39,7 @@ The held-back message is put back in the input box. Sending the same message aga
 
 ### Other features
 
-- **Document update on manual compaction too.** When you type `/compact` or the context passes 85%, Claude is asked to update the handoff document before compacting.
+- **Document update on manual compaction too.** When you type `/compact` or the context passes 85% of the compaction window (`preempt_percent`), Claude is asked to update the handoff document before compacting.
 - **Keeping the cache alive during background work.** While a session below the compaction threshold waits on background work, a short request is sent just before each expiry to keep the cache alive. When the work finishes and the session wakes up, the context isn't cached again.
 - **End-of-answer marks.** A small box at the end of the last answer shows the compaction and cache state. Press `Cancel` on the scheduled line to cancel it.
 
@@ -82,6 +82,7 @@ To check the install, run `claude plugin validate <repo>/plugins/state-compact`.
 | Option | Default | Description |
 | --- | --- | --- |
 | `handoff_file` | (empty) | File to update before compaction, relative to the repository root. If empty, compacts without updating anything |
+| `preempt_percent` | `85` | When the context passes this percentage of the compaction window, update the document and compact before auto-compaction does. The compaction window is the value set with `autoCompactWindow` or `/autocompact`, or the model's context window if unset. Auto-compaction runs about 33k tokens before the window, so keep it below that |
 | `language` | `ko` | Language of the end-of-answer marks, the warning, and the instructions sent to Claude. `ko` or `en` |
 
 Change them under the plugin's entries in `/config`, or in `pluginConfigs` in `settings.json`. When loaded with `--plugin-dir` or `CLAUDE_CODE_PLUGIN_DIRS`, the key is `state-compact` or `state-compact@inline`.
@@ -127,7 +128,7 @@ In a 1-hour TTL session, if background work is running when a turn ends and the 
 ### Handoff document update
 
 - Summary instructions passed to a manual `/compact` are kept for the compaction
-- Compaction at 85% runs before auto-compaction
+- Early compaction runs before auto-compaction. The percentage is of the compaction window, not the model's window, so it still comes first when `autoCompactWindow` is lowered
 - If the document exists at the repository root, it's updated every time regardless of its contents, so a session with no work in progress still gets one update turn
 - If the document is tracked by git, Claude is told to commit only that file
 
@@ -155,7 +156,7 @@ Tested on the Windows desktop app: manual `/compact` → document update → com
 - Updating the document before a pre-expiry compaction (the compaction observed went straight to compacting without an update)
 - The scheduled end-of-answer mark and its cancel button, the failed mark, and whether marks survive an app restart
 - Whether a held-back first message goes through when sent again, and whether a cache expiry that passed while the app was closed is added to the previous answer of a reopened session
-- Compaction at 85% context
+- Early compaction (`preempt_percent`)
 - Keeping the cache alive as a whole: whether a keep-alive actually extends the TTL, and whether the first request reads from the cache when the session wakes after background work finishes
 - The text and instructions with `language` set to `en`
 - 5-minute TTL sessions

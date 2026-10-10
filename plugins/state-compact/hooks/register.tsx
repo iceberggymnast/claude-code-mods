@@ -9,8 +9,6 @@ const IDLE_RULES = {
   '1h': { minTokens: 200_000, compactAfterMs: 55 * 60_000, lateLimitMs: 58 * 60_000 },
   '5m': { minTokens: 300_000, compactAfterMs: 4 * 60_000, lateLimitMs: 4.5 * 60_000 },
 } as const
-// 컨텍스트가 창의 이 비율을 넘기면 자동 압축이 오기 전에 handoff 문서 반영 후 먼저 압축한다.
-const PREEMPT_PERCENT = 85
 const ONE_HOUR_MS = 60 * 60_000
 const FIVE_MIN_MS = 5 * 60_000
 // 수동 /compact 때 캐시가 살아 있다고 보는 여유. 이보다 만료에 가까우면 반영 턴을 넣지 않는다.
@@ -50,7 +48,7 @@ const KO = {
   manual: '수동',
   away: '자리 비움',
   contextLabel: (percent?: number) => `컨텍스트 ${percent}%`,
-  contextReason: (percent?: number) => `컨텍스트가 ${percent}%까지 찼다.`,
+  contextReason: (percent?: number) => `컨텍스트가 압축 창의 ${percent}%까지 찼다.`,
   manualReason: '/compact를 실행했다.',
   awayReason: '자리를 비운 사이 프롬프트 캐시가 곧 만료된다.',
   compactAsTurn: '/compact 명령이 압축 대신 턴으로 처리됐다',
@@ -88,7 +86,7 @@ const EN: typeof KO = {
   manual: 'manual',
   away: 'away',
   contextLabel: percent => `context ${percent}%`,
-  contextReason: percent => `Context has reached ${percent}%.`,
+  contextReason: percent => `Context has reached ${percent}% of the compaction window.`,
   manualReason: '/compact was run.',
   awayReason: 'The prompt cache is about to expire while the user is away.',
   compactAsTurn: '/compact ran as a turn instead of compacting',
@@ -154,6 +152,8 @@ let pendingInstructions: string | undefined
 let isAwaitingCompactPrompt = false
 // 사용자 설정(userConfig). handoffFile이 비어 있으면 문서 반영 없이 압축만 한다.
 let handoffFile = ''
+// 컨텍스트가 압축 창의 이 비율을 넘기면 자동 압축이 오기 전에 handoff 문서 반영 후 먼저 압축한다.
+let preemptPercent = 0
 let msg = KO
 // 답(메시지 id)별 기록. $.store에 같이 써서 앱을 다시 켜도 남긴다.
 let marks = new Map<string, Mark[]>()
@@ -171,6 +171,7 @@ let diagWrite = Promise.resolve()
 
 export const register: Register = (on, options) => {
   handoffFile = String(options.handoff_file ?? '').trim()
+  preemptPercent = Number(options.preempt_percent)
   msg = options.language === 'en' ? EN : KO
 
   on('session.start', async ($, e, next) => {
@@ -314,10 +315,14 @@ export const register: Register = (on, options) => {
       return result
     }
 
-    const { context } = await $.session.usage()
-    if ((context.percent ?? 0) >= PREEMPT_PERCENT) {
-      diag($, `preempt percent=${context.percent}`)
-      $.clock.after(AFTER_TURN_MS, () => void begin($, msg.contextReason(context.percent), msg.contextLabel(context.percent)))
+    // context.percent는 모델 창 대비라, autoCompactWindow로 창을 줄이면 자동 압축이 먼저 온다.
+    // 압축 창은 breakdown의 rawMaxTokens에 있다. summary는 로컬 추정이라 API 요청을 보내지 않는다.
+    const { context } = await $.session.usage({ breakdown: 'summary' })
+    const window = context.breakdown?.rawMaxTokens ?? context.window
+    const percent = Math.round(((context.tokens ?? 0) / window) * 100)
+    diag($, `context ${context.tokens} of ${window} (${percent}%) preempt at ${preemptPercent}%`)
+    if (percent >= preemptPercent) {
+      $.clock.after(AFTER_TURN_MS, () => void begin($, msg.contextReason(percent), msg.contextLabel(percent)))
       return result
     }
     // 기록 파일 읽기와 응답 대기 판정에 몇 초가 걸린다. 턴 종료를 붙잡지 않도록 기다리지 않는다.
