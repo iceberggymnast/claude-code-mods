@@ -147,6 +147,8 @@ let isBusy = false
 let compactLabel: string | undefined
 let isAwaitingHandoffTurn = false
 let handoffTurnId: string | undefined
+// 반영 턴 도중 자동 압축이 지나갔다. 반영 턴이 끝나도 다시 압축하지 않는다.
+let isCompactedInHandoff = false
 let pendingInstructions: string | undefined
 // SDK 세션에서 /compact 명령을 실행하고 그 압축이 지나가기를 기다리는 중이다.
 let isAwaitingCompactPrompt = false
@@ -299,7 +301,11 @@ export const register: Register = (on, options) => {
 
     if (handoffTurnId !== undefined && e.turnId === handoffTurnId) {
       handoffTurnId = undefined
-      if (e.reason === 'answer') {
+      if (isCompactedInHandoff) {
+        // 또 압축하면 방금 만든 요약을 다시 요약한다.
+        diag($, 'handoff: compacted during turn, skip compact')
+        finish($)
+      } else if (e.reason === 'answer') {
         $.clock.after(AFTER_TURN_MS, () => void compactNow($))
       } else {
         finish($)
@@ -320,7 +326,8 @@ export const register: Register = (on, options) => {
     const { context } = await $.session.usage({ breakdown: 'summary' })
     const window = context.breakdown?.rawMaxTokens ?? context.window
     const percent = Math.round(((context.tokens ?? 0) / window) * 100)
-    diag($, `context ${context.tokens} of ${window} (${percent}%) preempt at ${preemptPercent}%`)
+    // 창을 어디서 정했는지(settings·auto 등)도 남긴다. 설정한 창보다 크게 찍히는 세션이 설정을 읽지 못한 것인지 가린다.
+    diag($, `context ${context.tokens} of ${window} (${percent}%) preempt at ${preemptPercent}% window=${context.breakdown?.autocompactSource}`)
     if (percent >= preemptPercent) {
       $.clock.after(AFTER_TURN_MS, () => void begin($, msg.contextReason(percent), msg.contextLabel(percent)))
       return result
@@ -336,6 +343,7 @@ export const register: Register = (on, options) => {
     const label = compactLabel ?? (e.trigger === 'auto' ? msg.auto : msg.manual)
     const r = await next(e)
     if (r.skip) return r
+    if (isAwaitingHandoffTurn || handoffTurnId !== undefined) isCompactedInHandoff = true
     // 압축하면서 캐시를 새로 만들었으므로 이전 요청 기준의 만료 표시와 경고는 맞지 않다.
     cancelExpiry()
     cancelKeepalive()
@@ -563,6 +571,7 @@ async function compactNow($: EngineInterface) {
 function finish($: EngineInterface) {
   isBusy = false
   isAwaitingHandoffTurn = false
+  isCompactedInHandoff = false
   isAwaitingCompactPrompt = false
   compactLabel = undefined
   pendingInstructions = undefined
