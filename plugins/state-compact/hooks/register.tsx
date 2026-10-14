@@ -344,7 +344,9 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     if (r.skip) return r
     if (isAwaitingHandoffTurn || handoffTurnId !== undefined) isCompactedInHandoff = true
-    // 압축하면서 캐시를 새로 만들었으므로 이전 요청 기준의 만료 표시와 경고는 맞지 않다.
+    // 압축하면서 캐시를 새로 만들었으므로 이전 요청 기준의 만료 전 압축, 만료 표시와 경고는 맞지 않다.
+    // 터미널의 공식 만료 전 압축(약 54분)이 이 모드의 예약(55분)보다 먼저 와도 다시 압축하지 않는다.
+    cancelIdle()
     cancelExpiry()
     cancelKeepalive()
     expiredResume = undefined

@@ -116,6 +116,13 @@ It's scheduled when a turn ends and all of the following hold.
 - Skipped if the machine wakes from sleep past the scheduled time, since the cache has already expired
 - The TTL is read from the last response in the session transcript. If it can't be read, nothing is scheduled
 
+### Overlap with Claude Code's idle compaction
+
+Since Claude Code 2.1.299, terminal sessions have a built-in feature that does the same thing (`idleCompaction`): a conversation of 200K tokens or more on the 1-hour TTL is compacted after about 54 idle minutes. The only overlap with this mod is pre-expiry compaction of 1-hour TTL sessions in the terminal. The desktop app, 5-minute TTL sessions, the handoff document update before compaction, holding back the first message to an expired session, and keeping the cache alive are this mod's alone.
+
+- In the terminal, the built-in compaction comes before this mod's 55-minute schedule. The mod then drops its schedule and doesn't compact again, so the handoff document isn't updated either
+- To update the document before compaction in the terminal too, turn the built-in feature off with `"idleCompaction": false` in `settings.json` (v2.1.290 or later)
+
 ### When the cache is kept alive
 
 In a 1-hour TTL session, if background work is running when a turn ends and the context is below the compaction threshold (200K tokens), a keep-alive request is sent 55 minutes after the last request. It resends the main conversation as is, followed by "reply with OK only", with no tools. It isn't added to the conversation. If it succeeds, the next one is scheduled 55 minutes after it.
@@ -160,7 +167,7 @@ Tested on the Windows desktop app: manual `/compact` → document update → com
 - Keeping the cache alive as a whole: whether a keep-alive actually extends the TTL, and whether the first request reads from the cache when the session wakes after background work finishes
 - The text and instructions with `language` set to `en`
 - 5-minute TTL sessions
-- The terminal CLI (function hooks were off in that build, so the mod didn't load)
+- The terminal CLI (function hooks were off in that build, so the mod didn't load). This includes dropping the schedule without compacting again when the built-in idle compaction comes first
 - macOS and Linux
 - Whether the mod loads when installed from the marketplace (`claude plugin marketplace add`)
 
