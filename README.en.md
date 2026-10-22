@@ -158,13 +158,17 @@ Why pre-expiry compaction wasn't scheduled, or was skipped, never shows up in th
 
 ## Tested
 
-Tested on the Windows desktop app: manual `/compact` → document update → compaction (including summary instructions), pre-expiry compaction in a 1-hour TTL session (it ran 55 minutes after the last request), and the end-of-answer mark on a manual `/compact` going from `◆ 압축 중…` to `◆ 15:35 압축됨 · 수동`, the `○ 18:16 캐시 만료` mark on a session whose TTL ran out while another session was in view, and holding back the first message to an expired 860K-token session with a warning and putting the message back in the input box. Early compaction triggered 4 times with a 500K compaction window and `preempt_percent` 80: 3 times it compacted after the document update, and once auto-compaction ran first during the update turn. Not yet tested:
+Tested on the Windows desktop app: manual `/compact` → document update → compaction (including summary instructions), pre-expiry compaction in a 1-hour TTL session (it ran 55 minutes after the last request), and the end-of-answer mark on a manual `/compact` going from `◆ 압축 중…` to `◆ 15:35 압축됨 · 수동`, the `○ 18:16 캐시 만료` mark on a session whose TTL ran out while another session was in view, and holding back the first message to an expired 860K-token session with a warning and putting the message back in the input box. Early compaction triggered 4 times with a 500K compaction window and `preempt_percent` 80: 3 times it compacted after the document update, and once auto-compaction ran first during the update turn. The decision log also confirms the following:
 
-- Updating the document before a pre-expiry compaction (the compaction observed went straight to compacting without an update)
+- Of 14 pre-expiry compactions, 13 compacted after a document update turn. Once the update turn ended in an error and nothing was compacted
+- The one time auto-compaction ran first during the update turn, the mod didn't compact again after the turn ended
+- With two keep-alive requests sent 55 minutes apart, the second one also read nearly the whole context (about 116K tokens) from the cache, so a keep-alive does extend the TTL
+
+Not yet tested:
+
 - The scheduled end-of-answer mark and its cancel button, the failed mark, and whether marks survive an app restart
 - Whether a held-back first message goes through when sent again, and whether a cache expiry that passed while the app was closed is added to the previous answer of a reopened session
-- Not compacting again after the update turn when auto-compaction ran first during it
-- Keeping the cache alive as a whole: whether a keep-alive actually extends the TTL, and whether the first request reads from the cache when the session wakes after background work finishes
+- Whether the first request reads from the cache when a kept-alive session wakes after background work finishes
 - The text and instructions with `language` set to `en`
 - 5-minute TTL sessions
 - The terminal CLI (function hooks were off in that build, so the mod didn't load). This includes dropping the schedule without compacting again when the built-in idle compaction comes first
