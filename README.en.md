@@ -137,7 +137,8 @@ In a 1-hour TTL session, if background work is running when a turn ends and the 
 - Summary instructions passed to a manual `/compact` are kept for the compaction
 - The early-compaction percentage is of the compaction window, not the model's window, so it usually still comes before auto-compaction when `autoCompactWindow` is lowered. The percentage is checked only when a turn ends, so if one turn grows the context a lot, auto-compaction can run during the update turn. It doesn't compact again after that turn
 - If the document exists at the repository root, it's updated every time regardless of its contents, so a session with no work in progress still gets one update turn
-- If the document is tracked by git, Claude is told to commit only that file
+- In the update turn, Claude is told to rewrite only the lines whose progress, next steps, or blockers changed, and not to append the history of finished work. If nothing changed, it leaves the document alone and replies "no change". An update turn that ends with an answer moves on to compaction either way
+- If the document is tracked by git, Claude is told to commit only that file when it changed it
 
 ### End-of-answer marks
 

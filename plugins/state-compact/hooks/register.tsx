@@ -66,11 +66,11 @@ const KO = {
   handoffPrompt: (path: string, file: string, isTracked: boolean, reason: string) =>
     [
       `[state-compact] ${reason} 곧 대화를 압축한다. 압축하면 지금 대화의 세부 내용은 요약으로 바뀐다.`,
-      `압축 전에 ${path}에 지금까지 진행한 내용과 다음에 할 일을 반영하라.`,
+      `압축 전에 이 대화에서 진행 상황, 다음에 할 일, 막힌 것이 바뀌었는지 보고, 바뀌었으면 ${path}의 해당 줄을 지금 상태로 다시 써라. 끝난 일의 경위는 덧붙이지 마라. 바뀐 것이 없으면 고치지 마라.`,
       isTracked
-        ? `${file}은 git이 추적하는 파일이다. \`git commit -- ${file}\` 형식으로 이 파일만 커밋하라. 다른 변경은 커밋에 넣지 마라.`
+        ? `${file}은 git이 추적하는 파일이다. 고쳤으면 \`git commit -- ${file}\` 형식으로 이 파일만 커밋하라. 다른 변경은 커밋에 넣지 마라.`
         : `${file}은 git이 추적하지 않는 파일이다. 커밋하지 마라.`,
-      '그 밖의 작업은 하지 말고, 끝나면 무엇을 고쳤는지 한 줄로만 답하라.',
+      '그 밖의 작업은 하지 말고, 끝나면 무엇을 고쳤는지 한 줄로만 답하라. 고친 것이 없으면 "변경 없음"이라고 답하라.',
     ].join('\n'),
 }
 const EN: typeof KO = {
@@ -104,11 +104,11 @@ const EN: typeof KO = {
   handoffPrompt: (path, file, isTracked, reason) =>
     [
       `[state-compact] ${reason} The conversation will be compacted soon. Compaction replaces the details of this conversation with a summary.`,
-      `Before that, update ${path} with the progress so far and what to do next.`,
+      `Before that, check whether the progress, next steps, or blockers changed in this conversation. If they did, rewrite the matching lines of ${path} to the current state. Don't append the history of finished work. If nothing changed, leave the file alone.`,
       isTracked
-        ? `${file} is tracked by git. Commit only this file, as \`git commit -- ${file}\`. Don't include other changes in the commit.`
+        ? `${file} is tracked by git. If you changed it, commit only this file, as \`git commit -- ${file}\`. Don't include other changes in the commit.`
         : `${file} isn't tracked by git. Don't commit it.`,
-      'Do nothing else, and when done reply in one line saying what you changed.',
+      'Do nothing else, and when done reply in one line saying what you changed, or "no change" if you changed nothing.',
     ].join('\n'),
 }
 
